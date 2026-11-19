@@ -49,12 +49,24 @@ async function main() {
   await prisma.fieldAgent.upsert({
     where: { phone: '+260970000001' },
     update: {},
-    create: { name: 'Joseph Tembo', phone: '+260970000001', employeeId: 'FA-001', region: 'Lusaka', teamId: team.id },
+    create: {
+      name: 'Joseph Tembo',
+      phone: '+260970000001',
+      employeeId: 'FA-001',
+      region: 'Lusaka',
+      teamId: team.id,
+    },
   });
   await prisma.fieldAgent.upsert({
     where: { phone: '+260970000002' },
     update: {},
-    create: { name: 'Ruth Phiri', phone: '+260970000002', employeeId: 'FA-002', region: 'Copperbelt', teamId: team.id },
+    create: {
+      name: 'Ruth Phiri',
+      phone: '+260970000002',
+      employeeId: 'FA-002',
+      region: 'Copperbelt',
+      teamId: team.id,
+    },
   });
 
   console.log('Synthetic GSM CaseDesk seed data is ready');

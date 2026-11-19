@@ -59,76 +59,194 @@ describe('AppController', () => {
   });
 
   it('creates, assigns and persists a synthetic ticket', async () => {
-    const result = await appController.simulateInbound({ phone: '+260970000001', text: 'Test network issue' });
+    const result = await appController.simulateInbound({
+      phone: '+260970000001',
+      text: 'Test network issue',
+    });
     expect(result.reference).toMatch(/^GSM-\d{6}$/);
-    const stored = await prisma.ticket.findUnique({ where: { id: result.ticketId! }, include: { assignments: true, messages: true } });
+    const stored = await prisma.ticket.findUnique({
+      where: { id: result.ticketId! },
+      include: { assignments: true, messages: true },
+    });
     expect(stored?.status).toBe('ASSIGNED');
     expect(stored?.assignments).toHaveLength(1);
     expect(stored?.messages).toHaveLength(1);
   });
 
   it('numbers tickets sequentially and threads follow-ups into the open ticket', async () => {
-    const first = await appController.simulateInbound({ phone: '+260970000001', text: 'One' });
-    const followUp = await appController.simulateInbound({ phone: '+260970000001', text: 'Two' });
-    const second = await appController.simulateInbound({ phone: '+260970000002', text: 'Three' });
+    const first = await appController.simulateInbound({
+      phone: '+260970000001',
+      text: 'One',
+    });
+    const followUp = await appController.simulateInbound({
+      phone: '+260970000001',
+      text: 'Two',
+    });
+    const second = await appController.simulateInbound({
+      phone: '+260970000002',
+      text: 'Three',
+    });
     expect(followUp.ticketId).toBe(first.ticketId);
-    expect(Number(second.reference!.slice(4))).toBe(Number(first.reference!.slice(4)) + 1);
+    expect(Number(second.reference!.slice(4))).toBe(
+      Number(first.reference!.slice(4)) + 1,
+    );
   });
 
   it('balances new tickets across back-office staff', async () => {
-    const a = await appController.simulateInbound({ phone: '+260970000001', text: 'A' });
-    const b = await appController.simulateInbound({ phone: '+260970000002', text: 'B' });
-    const ticketA = await appService.ticket('SUPERVISOR', 'demo-supervisor', a.ticketId!);
-    const ticketB = await appService.ticket('SUPERVISOR', 'demo-supervisor', b.ticketId!);
+    const a = await appController.simulateInbound({
+      phone: '+260970000001',
+      text: 'A',
+    });
+    const b = await appController.simulateInbound({
+      phone: '+260970000002',
+      text: 'B',
+    });
+    const ticketA = await appService.ticket(
+      'SUPERVISOR',
+      'demo-supervisor',
+      a.ticketId!,
+    );
+    const ticketB = await appService.ticket(
+      'SUPERVISOR',
+      'demo-supervisor',
+      b.ticketId!,
+    );
     expect(ticketA?.assignedUserId).not.toBe(ticketB?.assignedUserId);
   });
 
   it('revokes back-office access after reassignment', async () => {
-    const result = await appController.simulateInbound({ phone: '+260970000001', text: 'Access test' });
-    const before = await appService.ticket('SUPERVISOR', 'demo-supervisor', result.ticketId!);
-    const target = before?.assignedUserId === 'demo-agent-1' ? 'demo-agent-2' : 'demo-agent-1';
+    const result = await appController.simulateInbound({
+      phone: '+260970000001',
+      text: 'Access test',
+    });
+    const before = await appService.ticket(
+      'SUPERVISOR',
+      'demo-supervisor',
+      result.ticketId!,
+    );
+    const target =
+      before?.assignedUserId === 'demo-agent-1'
+        ? 'demo-agent-2'
+        : 'demo-agent-1';
     const previous = before!.assignedUserId!;
-    await appController.reassign('SUPERVISOR', 'demo-supervisor', result.ticketId!, { userId: target });
-    expect(await appService.ticket('BACK_OFFICE', previous, result.ticketId!)).toBeNull();
-    expect(await appService.ticket('BACK_OFFICE', target, result.ticketId!)).not.toBeNull();
+    await appController.reassign(
+      'SUPERVISOR',
+      'demo-supervisor',
+      result.ticketId!,
+      { userId: target },
+    );
+    expect(
+      await appService.ticket('BACK_OFFICE', previous, result.ticketId!),
+    ).toBeNull();
+    expect(
+      await appService.ticket('BACK_OFFICE', target, result.ticketId!),
+    ).not.toBeNull();
   });
 
   it('ignores duplicate provider message identifiers', async () => {
-    const first = await appController.simulateInbound({ phone: '+260970000001', text: 'Duplicate provider test', providerId: 'wamid.test.123' });
-    const second = await appController.simulateInbound({ phone: '+260970000001', text: 'Duplicate provider test', providerId: 'wamid.test.123' });
+    const first = await appController.simulateInbound({
+      phone: '+260970000001',
+      text: 'Duplicate provider test',
+      providerId: 'wamid.test.123',
+    });
+    const second = await appController.simulateInbound({
+      phone: '+260970000001',
+      text: 'Duplicate provider test',
+      providerId: 'wamid.test.123',
+    });
     expect(first.duplicate).toBe(false);
     expect(second.duplicate).toBe(true);
-    expect((await appService.ticket('SUPERVISOR', 'demo-supervisor', first.ticketId!))?.messages).toHaveLength(1);
+    expect(
+      (
+        await appService.ticket(
+          'SUPERVISOR',
+          'demo-supervisor',
+          first.ticketId!,
+        )
+      )?.messages,
+    ).toHaveLength(1);
   });
 
   it('records replies, first response time and status history', async () => {
-    const result = await appController.simulateInbound({ phone: '+260970000001', text: 'Reply test' });
-    const replied = await appController.reply('SUPERVISOR', 'demo-supervisor', result.ticketId!, { text: 'On it' });
+    const result = await appController.simulateInbound({
+      phone: '+260970000001',
+      text: 'Reply test',
+    });
+    const replied = await appController.reply(
+      'SUPERVISOR',
+      'demo-supervisor',
+      result.ticketId!,
+      { text: 'On it' },
+    );
     expect(replied.status).toBe('IN_PROGRESS');
     expect(replied.firstResponseAt).not.toBeNull();
-    expect(replied.messages.map((message) => message.direction)).toEqual(['INBOUND', 'OUTBOUND']);
-    const history = await prisma.ticketStatusHistory.findMany({ where: { ticketId: result.ticketId! }, orderBy: { createdAt: 'asc' } });
-    expect(history.map((entry) => entry.toStatus)).toEqual(['ASSIGNED', 'IN_PROGRESS']);
+    expect(replied.messages.map((message) => message.direction)).toEqual([
+      'INBOUND',
+      'OUTBOUND',
+    ]);
+    const history = await prisma.ticketStatusHistory.findMany({
+      where: { ticketId: result.ticketId! },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(history.map((entry) => entry.toStatus)).toEqual([
+      'ASSIGNED',
+      'IN_PROGRESS',
+    ]);
   });
 
   it('keeps an unbroken audit hash chain', async () => {
-    const result = await appController.simulateInbound({ phone: '+260970000001', text: 'Audit test' });
-    await appController.reply('SUPERVISOR', 'demo-supervisor', result.ticketId!, { text: 'Reply' });
-    const events = await prisma.auditEvent.findMany({ orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+    const result = await appController.simulateInbound({
+      phone: '+260970000001',
+      text: 'Audit test',
+    });
+    await appController.reply(
+      'SUPERVISOR',
+      'demo-supervisor',
+      result.ticketId!,
+      { text: 'Reply' },
+    );
+    const events = await prisma.auditEvent.findMany({
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
     expect(events.length).toBeGreaterThan(3);
-    events.slice(1).forEach((event, index) => expect(event.previousHash).toBe(events[index].hash));
+    events
+      .slice(1)
+      .forEach((event, index) =>
+        expect(event.previousHash).toBe(events[index].hash),
+      );
   });
 
   it('allows authorised reports and CSV export', async () => {
-    await appController.simulateInbound({ phone: '+260970000001', text: 'Report test' });
-    expect((await appController.reports('SUPERVISOR', 'demo-supervisor')).ticketsCreated).toBeGreaterThan(0);
-    expect(await appController.reportCsv('SUPERVISOR', 'demo-supervisor')).toContain('"metric","value"');
-    await expect(appController.reports('BACK_OFFICE', 'demo-agent-1')).rejects.toThrow();
+    await appController.simulateInbound({
+      phone: '+260970000001',
+      text: 'Report test',
+    });
+    expect(
+      (await appController.reports('SUPERVISOR', 'demo-supervisor'))
+        .ticketsCreated,
+    ).toBeGreaterThan(0);
+    expect(
+      await appController.reportCsv('SUPERVISOR', 'demo-supervisor'),
+    ).toContain('"metric","value"');
+    await expect(
+      appController.reports('BACK_OFFICE', 'demo-agent-1'),
+    ).rejects.toThrow();
   });
 
   it('enforces invalid status transitions', async () => {
-    const result = await appController.simulateInbound({ phone: '+260970000002', text: 'Status test' });
-    await expect(appController.status('SUPERVISOR', 'demo-supervisor', result.ticketId!, { status: 'CLOSED' })).rejects.toThrow();
-    await expect(appController.status('SUPERVISOR', 'demo-supervisor', result.ticketId!, { status: 'IN_PROGRESS' })).resolves.toBeDefined();
+    const result = await appController.simulateInbound({
+      phone: '+260970000002',
+      text: 'Status test',
+    });
+    await expect(
+      appController.status('SUPERVISOR', 'demo-supervisor', result.ticketId!, {
+        status: 'CLOSED',
+      }),
+    ).rejects.toThrow();
+    await expect(
+      appController.status('SUPERVISOR', 'demo-supervisor', result.ticketId!, {
+        status: 'IN_PROGRESS',
+      }),
+    ).resolves.toBeDefined();
   });
 });
