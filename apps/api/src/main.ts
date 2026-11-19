@@ -11,6 +11,6 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
   const config = new DocumentBuilder().setTitle('GSM CaseDesk API').setVersion('1.0').addBearerAuth().build();
   SwaggerModule.setup('docs', app, SwaggerModule.createDocument(app, config));
-  await app.listen(process.env.APP_PORT ? Number(process.env.APP_PORT) : 3001);
+  await app.listen(Number(process.env.PORT ?? process.env.APP_PORT ?? 3001), '0.0.0.0');
 }
 bootstrap();
