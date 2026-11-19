@@ -272,6 +272,15 @@ export class AppService {
 
   // ---------- queries ----------
 
+  async databaseReachable() {
+    try {
+      await this.prisma.$queryRaw`SELECT 1`;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async dashboard(role: string, user: string) {
     const [visible, staff] = await Promise.all([
       this.visible(role, user),
@@ -296,6 +305,7 @@ export class AppService {
         id: item.keycloakId,
         name: item.name,
         available: item.availability,
+        capacity: item.capacity,
         activeTickets: visible.filter(
           (ticket) =>
             ticket.assignedUserId === item.keycloakId && isOpen(ticket),
@@ -643,11 +653,13 @@ export class AppService {
     const resolutionSamples = visible
       .filter((ticket) => ticket.resolvedAt)
       .map((ticket) => minutesBetween(ticket.createdAt, ticket.resolvedAt!));
+    // One decimal place: whole-minute rounding hid sub-minute responses as 0.
     const average = (values: number[]) =>
       values.length
         ? Math.round(
-            values.reduce((sum, value) => sum + value, 0) / values.length,
-          )
+            (values.reduce((sum, value) => sum + value, 0) / values.length) *
+              10,
+          ) / 10
         : 0;
     const byDate = (messages: Ticket['messages']) =>
       messages.reduce<Record<string, number>>((result, message) => {

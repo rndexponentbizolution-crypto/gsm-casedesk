@@ -54,8 +54,10 @@ describe('AppController', () => {
     await module.close();
   });
 
-  it('reports simulation health', () => {
-    expect(appController.health().status).toBe('ok');
+  it('reports simulation health with a live database check', async () => {
+    const health = await appController.health();
+    expect(health.status).toBe('ok');
+    expect(health.database).toBe('ok');
   });
 
   it('creates, assigns and persists a synthetic ticket', async () => {

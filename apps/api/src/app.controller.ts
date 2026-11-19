@@ -16,9 +16,11 @@ export class AppController {
   constructor(private readonly app: AppService) {}
 
   @Get('health')
-  health() {
+  async health() {
+    const database = (await this.app.databaseReachable()) ? 'ok' : 'error';
     return {
-      status: 'ok',
+      status: database === 'ok' ? 'ok' : 'degraded',
+      database,
       mode:
         process.env.SIMULATION_ENABLED === 'false'
           ? 'live-ready'
