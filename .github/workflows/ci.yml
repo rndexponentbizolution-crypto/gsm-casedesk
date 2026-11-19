@@ -7,6 +7,23 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: casedesk
+          POSTGRES_USER: casedesk
+          POSTGRES_PASSWORD: casedesk
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U casedesk -d casedesk"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Throwaway CI database only. The API tests refuse to run against any other host.
+      DATABASE_URL: postgresql://casedesk:casedesk@localhost:5432/casedesk
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -16,4 +33,6 @@ jobs:
       - run: npm install --legacy-peer-deps
       - run: npm run build --workspace=@gsm-casedesk/api
       - run: npm run build --workspace=@gsm-casedesk/web
+      - run: npm run db:deploy --workspace=@gsm-casedesk/api
+      - run: npm run db:seed --workspace=@gsm-casedesk/api
       - run: npm run test --workspace=@gsm-casedesk/api -- --runInBand

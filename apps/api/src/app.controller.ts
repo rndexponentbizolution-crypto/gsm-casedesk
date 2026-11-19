@@ -21,8 +21,8 @@ export class AppController {
   }
 
   @Get('api/tickets/:id')
-  ticket(@Headers('x-demo-role') role = 'SUPERVISOR', @Headers('x-demo-user') user = 'demo-supervisor', @Param('id') id: string) {
-    const ticket = this.app.ticket(role, user, id);
+  async ticket(@Headers('x-demo-role') role = 'SUPERVISOR', @Headers('x-demo-user') user = 'demo-supervisor', @Param('id') id: string) {
+    const ticket = await this.app.ticket(role, user, id);
     if (!ticket) throw new BadRequestException('Ticket not found or not authorised');
     return ticket;
   }
