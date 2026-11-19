@@ -57,6 +57,15 @@ export default function Home() {
     await load();
   };
 
+  const simulator = (
+    <>
+      <h3 className="text-xs font-bold uppercase tracking-wide text-slate-400">Simulation</h3>
+      <select value={phone} onChange={(event) => setPhone(event.target.value)} className="mt-3 w-full rounded-md border border-slate-200 p-2 text-xs"><option value="+260970000001">Joseph Tembo</option><option value="+260970000002">Ruth Phiri</option></select>
+      <textarea value={simText} onChange={(event) => setSimText(event.target.value)} className="mt-2 w-full rounded-md border border-slate-200 p-2 text-xs" rows={3}/>
+      <button onClick={simulate} className="mt-2 w-full rounded-md border border-slate-300 py-2 text-xs font-bold">Send simulated message</button>
+    </>
+  );
+
   return (
     <main className="h-screen overflow-hidden bg-[#f4f5f7] text-slate-950">
       <aside className="fixed inset-y-0 left-0 w-[220px] border-r border-slate-200 bg-[#15171b] px-3 py-5 text-slate-300">
@@ -160,12 +169,17 @@ export default function Home() {
               <h3 className="text-xs font-bold uppercase tracking-wide text-slate-400">Case details</h3>
               <dl className="mt-5 space-y-4 text-sm"><div><dt className="text-xs text-slate-400">Status</dt><dd className="mt-1 font-semibold">{selected.status}</dd></div><div><dt className="text-xs text-slate-400">Assigned to</dt><dd className="mt-1 font-semibold">{selected.assignee}</dd></div><div><dt className="text-xs text-slate-400">Subject</dt><dd className="mt-1">{selected.subject}</dd></div></dl>
               {role === "SUPERVISOR" && <button onClick={async () => { await fetch(`${API}/api/tickets/${selected.id}/status`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ status: "RESOLVED" }) }); await load(); }} className="mt-6 w-full rounded-lg bg-slate-900 py-2.5 text-sm font-semibold text-white">Resolve case</button>}
-              <div className="mt-7 border-t border-slate-100 pt-5"><h3 className="text-xs font-bold uppercase tracking-wide text-slate-400">Simulation</h3><select value={phone} onChange={(event) => setPhone(event.target.value)} className="mt-3 w-full rounded-md border border-slate-200 p-2 text-xs"><option value="+260970000001">Joseph Tembo</option><option value="+260970000002">Ruth Phiri</option></select><textarea value={simText} onChange={(event) => setSimText(event.target.value)} className="mt-2 w-full rounded-md border border-slate-200 p-2 text-xs" rows={3}/><button onClick={simulate} className="mt-2 w-full rounded-md border border-slate-300 py-2 text-xs font-bold">Send simulated message</button></div>
+              <div className="mt-7 border-t border-slate-100 pt-5">{simulator}</div>
               <div className="mt-5 rounded-lg bg-slate-50 p-3 text-xs text-slate-500"><b>Metrics:</b> {String(metrics.open ?? 0)} open · {String(metrics.failedOutbound ?? 0)} failed outbound</div>
             </aside>
           </div>
         ) : (
-          <div className="grid place-items-center text-sm text-slate-400">Select an authorised ticket</div>
+          <div className="grid place-items-center p-6">
+            <div className="w-full max-w-sm text-center">
+              <p className="text-sm text-slate-400">{tickets.length ? "Select an authorised ticket" : "No tickets yet. Send a simulated WhatsApp message to create one."}</p>
+              <div className="mt-6 rounded-lg border border-slate-200 bg-white p-5 text-left">{simulator}</div>
+            </div>
+          </div>
         )}
       </section>
     </main>
