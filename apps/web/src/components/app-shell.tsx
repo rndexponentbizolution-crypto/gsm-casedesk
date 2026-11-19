@@ -2,6 +2,7 @@
 
 import {
   AlertTriangle,
+  BookOpenText,
   BarChart3,
   ChevronDown,
   Inbox,
@@ -20,6 +21,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useHealth, useTickets } from "@/lib/api";
 import { awaitingReply, cn } from "@/lib/format";
 import { IDENTITIES, useIdentity } from "@/lib/identity";
+import { NewTicketAlerts } from "./alerts";
 import { useSimulator } from "./simulator";
 import { Avatar, Button } from "./ui";
 
@@ -39,6 +41,7 @@ const NAV: Array<{ section: string; items: NavItem[] }> = [
     section: "Manage",
     items: [
       { href: "/reports", label: "Reports", icon: BarChart3, supervisorOnly: true },
+      { href: "/responses", label: "Responses", icon: BookOpenText },
       { href: "/field-agents", label: "Field agents", icon: Users },
       { href: "/staff", label: "Staff", icon: UserCog, supervisorOnly: true },
       { href: "/settings", label: "Settings", icon: Settings },
@@ -67,6 +70,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div className="flex min-h-dvh flex-col lg:pl-64">
         <Topbar onMenu={() => setMobileOpen(true)} />
         <main className="flex flex-1 flex-col">{children}</main>
+        <NewTicketAlerts />
       </div>
     </div>
   );
@@ -168,7 +172,7 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
       <div className="flex-1" />
       <Button size="sm" variant="secondary" onClick={() => simulator.open()}>
         <MessageSquarePlus size={15} aria-hidden />
-        <span className="hidden sm:inline">Simulate inbound</span>
+        <span className="hidden sm:inline">Field agent phone</span>
       </Button>
       <IdentityMenu />
     </header>

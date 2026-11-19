@@ -18,7 +18,7 @@ export function FieldAgentsView() {
   const rows = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return (agents.data ?? [])
-      .filter((agent) => !needle || `${agent.name} ${agent.phone} ${agent.region ?? ""} ${agent.employeeId ?? ""}`.toLowerCase().includes(needle))
+      .filter((agent) => !needle || `${agent.name} ${agent.phone} ${agent.region ?? ""} ${agent.employeeId ?? ""} ${agent.storeName ?? ""}`.toLowerCase().includes(needle))
       .map((agent) => {
         const theirs = (tickets.data ?? []).filter((ticket) => ticket.agent.phone === agent.phone);
         const last = theirs.map((ticket) => ticket.lastMessageAt).sort().at(-1);
@@ -28,7 +28,7 @@ export function FieldAgentsView() {
 
   return (
     <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-      <PageHeader title="Field agents" description="Registered agents who can open cases over WhatsApp." />
+      <PageHeader title="Field agents" description="Connect Store and Container agents registered to raise PIN resets over WhatsApp." />
       <Card bodyClassName="p-0">
         <div className="border-b border-slate-100 p-4">
           <div className="relative max-w-sm">
@@ -54,6 +54,7 @@ export function FieldAgentsView() {
               <thead className="bg-slate-50 text-left text-xs text-slate-500">
                 <tr>
                   <th className="px-5 py-2.5 font-medium">Agent</th>
+                  <th className="px-5 py-2.5 font-medium">Store / container</th>
                   <th className="px-5 py-2.5 font-medium">Employee ID</th>
                   <th className="px-5 py-2.5 font-medium">Region</th>
                   <th className="px-5 py-2.5 text-right font-medium">Open / total</th>
@@ -73,6 +74,10 @@ export function FieldAgentsView() {
                         </div>
                       </div>
                     </td>
+                    <td className="px-5 py-3 text-slate-700">
+                      {agent.storeName ?? "—"}
+                      {agent.shopType && <span className="block text-[11px] text-slate-400">{agent.shopType}</span>}
+                    </td>
                     <td className="px-5 py-3 font-mono text-xs text-slate-600">{agent.employeeId ?? "—"}</td>
                     <td className="px-5 py-3 text-slate-600">{agent.region ?? "—"}</td>
                     <td className="px-5 py-3 text-right tabular-nums text-slate-900">
@@ -82,7 +87,7 @@ export function FieldAgentsView() {
                     <td className="px-5 py-3 text-slate-500">{last ? listTime(last) : "Never"}</td>
                     <td className="px-5 py-3 text-right">
                       <Button size="sm" variant="ghost" onClick={() => simulator.open(agent.phone)}>
-                        <MessageSquarePlus size={14} aria-hidden /> Simulate
+                        <MessageSquarePlus size={14} aria-hidden /> Open phone
                       </Button>
                     </td>
                   </tr>

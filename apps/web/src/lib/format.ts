@@ -1,6 +1,6 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
-import type { Ticket, TicketStatus } from "./api";
+import type { ResponseEffect, StandardResponse, Ticket, TicketStatus } from "./api";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -23,8 +23,8 @@ export const STATUS_TRANSITIONS: Record<TicketStatus, TicketStatus[]> = {
   UNASSIGNED: ["ASSIGNED", "ESCALATED", "CLOSED"],
   ASSIGNED: ["IN_PROGRESS", "PENDING_INFORMATION", "ESCALATED", "RESOLVED"],
   IN_PROGRESS: ["PENDING_INFORMATION", "ESCALATED", "RESOLVED", "CLOSED"],
-  PENDING_INFORMATION: ["IN_PROGRESS", "ESCALATED", "RESOLVED"],
-  ESCALATED: ["IN_PROGRESS", "PENDING_INFORMATION", "RESOLVED"],
+  PENDING_INFORMATION: ["IN_PROGRESS", "ESCALATED", "RESOLVED", "CLOSED"],
+  ESCALATED: ["IN_PROGRESS", "PENDING_INFORMATION", "RESOLVED", "CLOSED"],
   RESOLVED: ["IN_PROGRESS", "CLOSED"],
   CLOSED: ["IN_PROGRESS"],
 };
@@ -33,8 +33,64 @@ export const OPEN_STATUSES: TicketStatus[] = ["NEW", "UNASSIGNED", "ASSIGNED", "
 
 export const isOpen = (ticket: Pick<Ticket, "status">) => OPEN_STATUSES.includes(ticket.status);
 
-/** Ticket is waiting on us: the last message came from the field agent. */
-export const awaitingReply = (ticket: Ticket) => isOpen(ticket) && ticket.messages.at(-1)?.direction === "INBOUND";
+/** The WhatsApp bot (not a person) is still handling the conversation. */
+export const withBot = (ticket: Pick<Ticket, "botState" | "status">) =>
+  isOpen(ticket) && ["MENU", "OTHER_MENU", "AWAITING_PIN_DETAILS"].includes(ticket.botState);
+
+/** Ticket is waiting on us: the last message came from the field agent and the bot isn't handling it. */
+export const awaitingReply = (ticket: Ticket) => isOpen(ticket) && !withBot(ticket) && ticket.messages.at(-1)?.direction === "INBOUND";
+
+export const BOT_STATE_LABEL: Record<string, string> = {
+  MENU: "Choosing query type",
+  OTHER_MENU: "Choosing query type",
+  AWAITING_PIN_DETAILS: "Sending PIN reset details",
+};
+
+export type SlaState = { level: "none" | "ok" | "soon" | "breached"; remainingMs: number; label: string };
+
+/** SLA countdown for open tickets. "soon" = last 20% of the window (min 1 minute). */
+export function slaState(ticket: Pick<Ticket, "slaDueAt" | "status" | "createdAt">, now: number): SlaState {
+  if (!ticket.slaDueAt || !isOpen(ticket) || !now) return { level: "none", remainingMs: 0, label: "" };
+  const due = new Date(ticket.slaDueAt).getTime();
+  const remainingMs = due - now;
+  if (remainingMs <= 0) return { level: "breached", remainingMs, label: `Overdue ${formatClock(-remainingMs)}` };
+  const windowMs = Math.max(60_000, due - new Date(ticket.createdAt).getTime());
+  return {
+    level: remainingMs < Math.max(60_000, windowMs * 0.2) ? "soon" : "ok",
+    remainingMs,
+    label: `${formatClock(remainingMs)} left`,
+  };
+}
+
+/** m:ss under an hour, otherwise the coarse duration. */
+export function formatClock(ms: number) {
+  if (ms >= 3600_000) return formatDuration(ms);
+  const total = Math.floor(ms / 1000);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+export function describeEffect(effect: ResponseEffect): { label: string; tone: "good" | "bad" | "warn" | "info" | "esc" } {
+  switch (effect.kind) {
+    case "acknowledge":
+      return { label: "Acknowledges · moves to In progress", tone: "info" };
+    case "resolve":
+      return { label: `Resolves · ${effect.outcome}`, tone: "good" };
+    case "close":
+      return { label: `Closes unresolved · ${effect.outcome}`, tone: "bad" };
+    case "pending":
+      return { label: `Waits on agent · ${effect.outcome}`, tone: "warn" };
+    case "escalate":
+      return { label: `Escalates · "${effect.subject}" · ${effect.slaHours}h`, tone: "esc" };
+    case "redirect_email":
+      return { label: "Closes · redirected to email", tone: "bad" };
+    default:
+      return { label: "No status change", tone: "info" };
+  }
+}
+
+export function fillResponse(response: Pick<StandardResponse, "body">, agentName: string) {
+  return response.body.replace(/{name}/g, agentName.split(" ")[0] ?? "").replace(/ ,/g, ",");
+}
 
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -112,6 +168,11 @@ const AUDIT_LABEL: Record<string, string> = {
   TICKET_RESOLVED: "Resolved",
   TICKET_STATUS_CHANGED: "Status changed",
   DUPLICATE_WEBHOOK_IGNORED: "Duplicate message ignored",
+  BOT_QUERY_SELECTED: "Bot: query type selected",
+  PIN_RESET_ROUTED: "PIN reset routed · high priority · 5 min SLA",
+  BOT_REDIRECTED_TO_EMAIL: "Bot redirected to email",
+  TICKET_ESCALATED: "Escalated",
+  CASE_UPDATED: "Case details updated",
 };
 
 export function describeAudit(type: string, metadata: Record<string, unknown>, names: Map<string, string>) {
@@ -119,6 +180,8 @@ export function describeAudit(type: string, metadata: Record<string, unknown>, n
   const name = (id: unknown) => (typeof id === "string" ? names.get(id) ?? id : "—");
   if (type === "TICKET_ASSIGNED") return `${label} to ${name(metadata.userId)}`;
   if (type === "TICKET_REASSIGNED") return `${label} from ${name(metadata.from)} to ${name(metadata.to)}`;
+  if (type === "TICKET_ESCALATED" && typeof metadata.subject === "string") return `${label}: ${metadata.subject}`;
+  if (type === "BOT_QUERY_SELECTED" && typeof metadata.queryType === "string") return `Bot: ${metadata.queryType === "PIN_RESET" ? "PIN reset" : metadata.queryType} selected`;
   if (type === "TICKET_STATUS_CHANGED" && typeof metadata.to === "string")
     return `${label} to ${STATUS_LABEL[metadata.to as TicketStatus] ?? metadata.to}`;
   return label;

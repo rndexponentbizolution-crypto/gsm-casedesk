@@ -6,6 +6,7 @@ import {
   Header,
   Headers,
   Param,
+  Patch,
   Post,
   Query,
 } from '@nestjs/common';
@@ -63,9 +64,29 @@ export class AppController {
     @Headers('x-demo-role') role = 'SUPERVISOR',
     @Headers('x-demo-user') user = 'demo-supervisor',
     @Param('id') id: string,
-    @Body() body: { text?: string },
+    @Body() body: { text?: string; templateId?: string },
   ) {
-    return this.app.reply(role, user, id, body.text);
+    return this.app.reply(role, user, id, body.text, body.templateId);
+  }
+
+  @Patch('api/tickets/:id/case')
+  updateCase(
+    @Headers('x-demo-role') role = 'SUPERVISOR',
+    @Headers('x-demo-user') user = 'demo-supervisor',
+    @Param('id') id: string,
+    @Body() body: { queryType?: string; details?: Record<string, unknown> },
+  ) {
+    return this.app.updateCase(role, user, id, body ?? {});
+  }
+
+  @Get('api/query-types')
+  queryTypes() {
+    return this.app.queryTypes();
+  }
+
+  @Get('api/responses')
+  responses() {
+    return this.app.responses();
   }
 
   @Post('api/tickets/:id/reassign')
@@ -97,6 +118,7 @@ export class AppController {
       mediaType?: string;
       duplicate?: boolean;
       providerId?: string;
+      replyId?: string;
     },
   ) {
     if (
@@ -105,7 +127,7 @@ export class AppController {
     ) {
       throw new BadRequestException('Simulator unavailable');
     }
-    if (!body.phone || (!body.text && !body.mediaType))
+    if (!body.phone || (!body.text && !body.mediaType && !body.replyId))
       throw new BadRequestException('phone and message content are required');
     return this.app.simulateInbound(body);
   }
@@ -134,5 +156,17 @@ export class AppController {
     @Headers('x-demo-user') user = 'demo-supervisor',
   ) {
     return this.app.reportCsv(role, user);
+  }
+
+  /** SOP Step 6 daily log for one day (YYYY-MM-DD, Lusaka time; defaults to today). */
+  @Get('api/reports/daily-log.csv')
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="gsm-daily-log.csv"')
+  async dailyLog(
+    @Headers('x-demo-role') role = 'SUPERVISOR',
+    @Headers('x-demo-user') user = 'demo-supervisor',
+    @Query('date') date?: string,
+  ) {
+    return (await this.app.dailyLogCsv(role, user, date)).csv;
   }
 }

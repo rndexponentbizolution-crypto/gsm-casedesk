@@ -3,10 +3,13 @@
 import {
   AlertTriangle,
   ArrowLeft,
+  Bot,
+  BookOpenText,
   Check,
   CheckCheck,
   CheckCircle2,
   Clock,
+  ImageIcon,
   Inbox as InboxIcon,
   MapPin,
   MessageSquarePlus,
@@ -17,6 +20,8 @@ import {
   SendHorizontal,
   ShieldAlert,
   ShieldCheck,
+  Store,
+  Timer,
   X,
 } from "lucide-react";
 import Link from "next/link";
@@ -24,29 +29,39 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   useChangeStatus,
   useDashboard,
+  useQueryTypes,
   useReassign,
   useReply,
+  useResponses,
   useTickets,
+  useUpdateCase,
   type Message,
+  type StandardResponse,
   type Ticket,
   type TicketStatus,
 } from "@/lib/api";
 import {
   awaitingReply,
+  BOT_STATE_LABEL,
   cn,
   dayLabel,
   describeAudit,
+  fillResponse,
   formatDuration,
   isOpen,
   listTime,
   serviceWindow,
   shortTime,
+  slaState,
   STATUS_LABEL,
   STATUS_TRANSITIONS,
   timeAgo,
+  withBot,
 } from "@/lib/format";
 import { IDENTITIES, useIdentity } from "@/lib/identity";
 import { useNow } from "@/lib/use-now";
+import { EscalationCard, LogFields, PinResetWorkspace, SlaCard } from "./casework";
+import { EffectPill, ResponsePicker, suggestedResponseIds } from "./responses";
 import { useSimulator } from "./simulator";
 import { Avatar, Button, EmptyState, ErrorNotice, Skeleton, StatusBadge, inputClass } from "./ui";
 
@@ -54,20 +69,16 @@ export type InboxView = "mine" | "all" | "escalated";
 
 const VIEW_TITLE: Record<InboxView, string> = { mine: "My tickets", all: "All tickets", escalated: "Escalated" };
 
-type Filter = "needs-reply" | "open" | "closed" | "all";
-const FILTERS: Array<{ id: Filter; label: string }> = [
+type Filter = "open" | "needs-reply" | "bot" | "closed" | "all";
+const FILTERS: Array<{ id: Filter; label: string; supervisorOnly?: boolean }> = [
   { id: "open", label: "Open" },
   { id: "needs-reply", label: "Needs reply" },
-  { id: "closed", label: "Resolved" },
+  { id: "bot", label: "With bot", supervisorOnly: true },
+  { id: "closed", label: "Closed" },
   { id: "all", label: "All" },
 ];
 
-const QUICK_REPLIES = [
-  "Thanks, we've received your message and are looking into it.",
-  "Could you share a photo or screenshot of the issue?",
-  "Please confirm your site ID and exact location.",
-  "This has been resolved on our side. Please confirm it's working now.",
-];
+type Draft = { text: string; templateId?: string };
 
 function useNames() {
   const dashboard = useDashboard();
@@ -75,21 +86,31 @@ function useNames() {
     const names = new Map<string, string>(IDENTITIES.map((item) => [item.id, item.name]));
     dashboard.data?.workload.forEach((item) => names.set(item.id, item.name));
     names.set("system", "System");
+    names.set("bot", "GSM Bot");
     return names;
   }, [dashboard.data]);
 }
 
+/** Open work sorted by SLA urgency (soonest due first), then most recent activity. */
+function byUrgency(a: Ticket, b: Ticket) {
+  const due = (ticket: Ticket) => (ticket.slaDueAt && isOpen(ticket) ? new Date(ticket.slaDueAt).getTime() : Infinity);
+  return due(a) - due(b) || b.lastMessageAt.localeCompare(a.lastMessageAt);
+}
 
 export function InboxPage({ view }: { view: InboxView }) {
   const { identity, isSupervisor } = useIdentity();
   const tickets = useTickets();
+  const queryTypes = useQueryTypes();
+  const responses = useResponses();
   const simulator = useSimulator();
   // Null until mounted (no clock reads during prerender); tickets only render after mount.
-  const now = useNow() ?? 0;
+  const now = useNow(1_000) ?? 0;
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>(view === "escalated" ? "all" : "open");
+  const [typeFilter, setTypeFilter] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState(false);
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
 
   // Details sit beside the chat on wide screens; elsewhere they're an overlay opened on demand.
   useEffect(() => {
@@ -103,22 +124,29 @@ export function InboxPage({ view }: { view: InboxView }) {
     return all;
   }, [tickets.data, view, identity.id]);
 
+  const matchesFilter = (ticket: Ticket, value: Filter) => {
+    if (value === "open") return isOpen(ticket) && !withBot(ticket);
+    if (value === "needs-reply") return awaitingReply(ticket);
+    if (value === "bot") return withBot(ticket);
+    if (value === "closed") return !isOpen(ticket);
+    return true;
+  };
+
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return scoped
-      .filter((ticket) => {
-        if (filter === "open") return isOpen(ticket);
-        if (filter === "closed") return !isOpen(ticket);
-        if (filter === "needs-reply") return awaitingReply(ticket);
-        return true;
-      })
+      .filter((ticket) => matchesFilter(ticket, filter))
+      .filter((ticket) => !typeFilter || ticket.queryType === typeFilter)
       .filter(
         (ticket) =>
           !needle ||
-          `${ticket.reference} ${ticket.agent.name} ${ticket.agent.phone} ${ticket.subject} ${ticket.region}`.toLowerCase().includes(needle),
+          `${ticket.reference} ${ticket.agent.name} ${ticket.agent.phone} ${ticket.agent.storeName ?? ""} ${ticket.details.msisdn ?? ""} ${ticket.subject} ${ticket.region} ${ticket.queryTypeLabel ?? ""}`
+            .toLowerCase()
+            .includes(needle),
       )
-      .sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
-  }, [scoped, filter, query]);
+      .sort(filter === "closed" || filter === "all" ? (a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt) : byUrgency);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- matchesFilter is pure
+  }, [scoped, filter, typeFilter, query]);
 
   // On wide screens, keep a ticket open; on narrow screens the list is the starting point.
   useEffect(() => {
@@ -128,21 +156,19 @@ export function InboxPage({ view }: { view: InboxView }) {
   }, [filtered, scoped, selectedId]);
 
   const selected = scoped.find((ticket) => ticket.id === selectedId) ?? null;
-  const counts = {
-    open: scoped.filter(isOpen).length,
-    "needs-reply": scoped.filter(awaitingReply).length,
-    closed: scoped.filter((ticket) => !isOpen(ticket)).length,
-    all: scoped.length,
+  const responseById = useMemo(() => new Map((responses.data ?? []).map((response) => [response.id, response])), [responses.data]);
+
+  const loadResponse = (responseId: string) => {
+    const response = responseById.get(responseId);
+    if (!selected || !response) return;
+    setDrafts((current) => ({ ...current, [selected.id]: { text: fillResponse(response, selected.agent.name), templateId: response.id } }));
   };
 
   return (
     <div className="flex h-[calc(100dvh-3.5rem)] min-h-0">
       {/* ---------- list ---------- */}
       <section
-        className={cn(
-          "flex w-full min-w-0 flex-col border-r border-slate-200 bg-white lg:w-[360px] lg:shrink-0",
-          selected && "hidden lg:flex",
-        )}
+        className={cn("flex w-full min-w-0 flex-col border-r border-slate-200 bg-white lg:w-[380px] lg:shrink-0", selected && "hidden lg:flex")}
         aria-label="Tickets"
       >
         <div className="space-y-3 border-b border-slate-200 px-4 pb-3 pt-4">
@@ -150,37 +176,55 @@ export function InboxPage({ view }: { view: InboxView }) {
             <h1 className="text-lg font-semibold text-slate-950">{VIEW_TITLE[view]}</h1>
             <span className="text-xs text-slate-400">{tickets.isFetching ? "Updating…" : `${filtered.length} shown`}</span>
           </div>
-          <div className="relative">
-            <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search name, phone, reference…"
-              aria-label="Search tickets"
-              className={cn(inputClass, "bg-slate-50 pl-9")}
-            />
-            {query && (
-              <button onClick={() => setQuery("")} className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-slate-400 hover:text-slate-700" aria-label="Clear search">
-                <X size={14} />
-              </button>
-            )}
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search name, MSISDN, store, ref…"
+                aria-label="Search tickets"
+                className={cn(inputClass, "bg-slate-50 pl-9")}
+              />
+              {query && (
+                <button onClick={() => setQuery("")} className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-slate-400 hover:text-slate-700" aria-label="Clear search">
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+            <select
+              value={typeFilter}
+              onChange={(event) => setTypeFilter(event.target.value)}
+              aria-label="Filter by query type"
+              className={cn(inputClass, "w-32 bg-slate-50 px-2 text-xs")}
+            >
+              <option value="">All types</option>
+              {(queryTypes.data ?? []).map((type) => (
+                <option key={type.key} value={type.key}>
+                  {type.label}
+                </option>
+              ))}
+            </select>
           </div>
-          <div className="flex gap-1 overflow-x-auto" role="tablist" aria-label="Filter tickets">
-            {FILTERS.map((item) => (
-              <button
-                key={item.id}
-                role="tab"
-                aria-selected={filter === item.id}
-                onClick={() => setFilter(item.id)}
-                className={cn(
-                  "flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition",
-                  filter === item.id ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100",
-                )}
-              >
-                {item.label}
-                <span className={cn("tabular-nums", filter === item.id ? "text-slate-300" : "text-slate-400")}>{counts[item.id]}</span>
-              </button>
-            ))}
+          <div className="no-scrollbar flex gap-1 overflow-x-auto" role="tablist" aria-label="Filter tickets">
+            {FILTERS.filter((item) => isSupervisor || !item.supervisorOnly).map((item) => {
+              const count = scoped.filter((ticket) => matchesFilter(ticket, item.id)).length;
+              return (
+                <button
+                  key={item.id}
+                  role="tab"
+                  aria-selected={filter === item.id}
+                  onClick={() => setFilter(item.id)}
+                  className={cn(
+                    "flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition",
+                    filter === item.id ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100",
+                  )}
+                >
+                  {item.label}
+                  <span className={cn("tabular-nums", filter === item.id ? "text-slate-300" : "text-slate-400")}>{count}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -212,11 +256,15 @@ export function InboxPage({ view }: { view: InboxView }) {
             key={selected.id}
             ticket={selected}
             now={now}
+            responses={responses.data ?? []}
+            draft={drafts[selected.id] ?? { text: "" }}
+            setDraft={(draft) => setDrafts((current) => ({ ...current, [selected.id]: draft }))}
+            onUseResponse={loadResponse}
             onBack={() => setSelectedId(null)}
             showDetails={showDetails}
             onToggleDetails={() => setShowDetails((value) => !value)}
           />
-          {showDetails && <Details ticket={selected} now={now} onClose={() => setShowDetails(false)} />}
+          {showDetails && <Details ticket={selected} now={now} onClose={() => setShowDetails(false)} onUseResponse={loadResponse} />}
         </>
       ) : tickets.isPending ? (
         <div className="hidden flex-1 lg:block" aria-busy="true" />
@@ -225,7 +273,7 @@ export function InboxPage({ view }: { view: InboxView }) {
           <EmptyState
             icon={<InboxIcon size={20} />}
             title={scoped.length ? "Select a ticket" : "No conversations yet"}
-            description={scoped.length ? "Choose a conversation from the list to read and reply." : "Incoming WhatsApp messages from field agents will appear here."}
+            description={scoped.length ? "Choose a conversation from the list to read and reply." : "Messages from Connect Store and Container agents will appear here."}
             action={
               !scoped.length && (
                 <Button variant="primary" onClick={() => simulator.open()}>
@@ -263,7 +311,7 @@ function ListEmpty({ view, isSupervisor, hasAny, onSimulate }: { view: InboxView
       <EmptyState
         icon={<InboxIcon size={20} />}
         title="Supervisors don't hold tickets"
-        description="New tickets are routed to back-office staff. Monitor every case from All tickets."
+        description="PIN resets are routed to back-office staff. Monitor every case from All tickets."
         action={
           <Link href="/tickets/all" className="text-sm font-medium text-slate-900 underline underline-offset-2">
             Go to All tickets
@@ -276,7 +324,7 @@ function ListEmpty({ view, isSupervisor, hasAny, onSimulate }: { view: InboxView
     <EmptyState
       icon={<InboxIcon size={20} />}
       title="Inbox zero"
-      description="No tickets yet. Messages from field agents create tickets automatically."
+      description="New PIN resets are routed here automatically after the bot collects the details."
       action={
         <Button size="sm" onClick={onSimulate}>
           <MessageSquarePlus size={14} aria-hidden /> Simulate a message
@@ -286,36 +334,65 @@ function ListEmpty({ view, isSupervisor, hasAny, onSimulate }: { view: InboxView
   );
 }
 
+export function SlaBadge({ ticket, now }: { ticket: Ticket; now: number }) {
+  const sla = slaState(ticket, now);
+  if (sla.level === "none") return null;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 whitespace-nowrap rounded-full px-1.5 py-0.5 font-mono text-[10px] font-semibold tabular-nums",
+        sla.level === "ok" && "bg-emerald-50 text-emerald-700",
+        sla.level === "soon" && "bg-amber-100 text-amber-800",
+        sla.level === "breached" && "animate-pulse bg-red-100 text-red-700",
+      )}
+    >
+      {sla.level === "breached" ? <AlertTriangle size={10} aria-hidden /> : <Timer size={10} aria-hidden />}
+      {sla.label}
+    </span>
+  );
+}
+
 function TicketRow({ ticket, active, onSelect, now, showAssignee }: { ticket: Ticket; active: boolean; onSelect: () => void; now: number; showAssignee: boolean }) {
   const last = ticket.messages.at(-1);
   const waiting = awaitingReply(ticket);
+  const bot = withBot(ticket);
   return (
     <button
       onClick={onSelect}
       aria-current={active ? "true" : undefined}
-      className={cn(
-        "flex w-full gap-3 border-b border-slate-100 px-4 py-3.5 text-left transition",
-        active ? "bg-amber-50/70" : "hover:bg-slate-50",
-      )}
+      className={cn("flex w-full gap-3 border-b border-slate-100 px-4 py-3.5 text-left transition", active ? "bg-amber-50/70" : "hover:bg-slate-50")}
     >
       <div className="relative">
         <Avatar name={ticket.agent.name} size={40} />
         {waiting && <span className="absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full border-2 border-white bg-emerald-500" aria-label="Awaiting reply" />}
+        {ticket.priority === 1 && isOpen(ticket) && (
+          <span className="absolute -bottom-0.5 -right-0.5 grid h-4 w-4 place-items-center rounded-full border-2 border-white bg-red-500 text-[8px] font-bold text-white" aria-label="High priority">
+            !
+          </span>
+        )}
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-2">
           <p className={cn("truncate text-sm text-slate-900", waiting ? "font-semibold" : "font-medium")}>{ticket.agent.name}</p>
           <span className={cn("shrink-0 text-[11px]", waiting ? "font-medium text-emerald-700" : "text-slate-400")}>{listTime(ticket.lastMessageAt)}</span>
         </div>
+        <p className="truncate text-[11px] text-slate-400">{ticket.agent.storeName ?? ticket.agent.phone}</p>
         <p className={cn("mt-0.5 truncate text-[13px]", waiting ? "text-slate-700" : "text-slate-500")}>
-          {last?.direction === "OUTBOUND" && <span className="text-slate-400">You: </span>}
-          {last?.body ?? ticket.subject}
+          {last?.sender === "bot" ? <span className="text-slate-400">Bot: </span> : last?.direction === "OUTBOUND" ? <span className="text-slate-400">You: </span> : null}
+          {last?.mediaType ? `📷 ${last.body}` : (last?.body ?? ticket.subject)}
         </p>
-        <div className="mt-2 flex items-center gap-2">
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <span className="font-mono text-[11px] font-medium text-amber-700">{ticket.reference}</span>
-          <StatusBadge status={ticket.status} />
-          {showAssignee && <span className="ml-auto truncate text-[11px] text-slate-400">{ticket.assignee}</span>}
-          {!showAssignee && isOpen(ticket) && <span className="ml-auto text-[11px] text-slate-400">{timeAgo(ticket.createdAt, now)}</span>}
+          {ticket.queryTypeLabel && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">{ticket.queryTypeLabel}</span>}
+          {bot ? (
+            <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700 ring-1 ring-inset ring-violet-200">
+              <Bot size={10} aria-hidden /> {BOT_STATE_LABEL[ticket.botState] ?? "With bot"}
+            </span>
+          ) : (
+            <StatusBadge status={ticket.status} />
+          )}
+          <SlaBadge ticket={ticket} now={now} />
+          {showAssignee && !bot && <span className="ml-auto truncate text-[11px] text-slate-400">{ticket.assignee}</span>}
         </div>
       </div>
     </button>
@@ -326,19 +403,45 @@ function TicketRow({ ticket, active, onSelect, now, showAssignee }: { ticket: Ti
 
 type TimelineItem = { kind: "message"; at: string; message: Message } | { kind: "event"; at: string; id: string; text: string };
 
-const TIMELINE_EVENTS = new Set(["TICKET_CREATED", "TICKET_ASSIGNED", "TICKET_REASSIGNED", "TICKET_STATUS_CHANGED", "TICKET_RESOLVED"]);
+const TIMELINE_EVENTS = new Set(["TICKET_ASSIGNED", "TICKET_REASSIGNED", "TICKET_STATUS_CHANGED", "TICKET_RESOLVED", "TICKET_ESCALATED", "PIN_RESET_ROUTED", "BOT_REDIRECTED_TO_EMAIL"]);
 
-function Conversation({ ticket, now, onBack, showDetails, onToggleDetails }: { ticket: Ticket; now: number; onBack: () => void; showDetails: boolean; onToggleDetails: () => void }) {
+function Conversation({
+  ticket,
+  now,
+  responses,
+  draft,
+  setDraft,
+  onUseResponse,
+  onBack,
+  showDetails,
+  onToggleDetails,
+}: {
+  ticket: Ticket;
+  now: number;
+  responses: StandardResponse[];
+  draft: Draft;
+  setDraft: (draft: Draft) => void;
+  onUseResponse: (responseId: string) => void;
+  onBack: () => void;
+  showDetails: boolean;
+  onToggleDetails: () => void;
+}) {
   const { identity, isSupervisor } = useIdentity();
   const names = useNames();
   const reply = useReply(ticket.id);
   const changeStatus = useChangeStatus(ticket.id);
-  const [text, setText] = useState("");
+  const [picker, setPicker] = useState<{ query: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const window24 = serviceWindow(ticket, now);
   const canAct = isSupervisor || ticket.assignedUserId === identity.id;
   const closed = !isOpen(ticket);
+  const bot = withBot(ticket);
+  const responseById = useMemo(() => new Map(responses.map((response) => [response.id, response])), [responses]);
+  const template = draft.templateId ? responseById.get(draft.templateId) : undefined;
+  const suggestions = suggestedResponseIds(ticket)
+    .map((id) => responseById.get(id))
+    .filter((response): response is StandardResponse => Boolean(response));
 
   const timeline = useMemo<TimelineItem[]>(() => {
     const items: TimelineItem[] = [
@@ -358,14 +461,26 @@ function Conversation({ ticket, now, onBack, showDetails, onToggleDetails }: { t
     const area = textRef.current;
     if (!area) return;
     area.style.height = "auto";
-    area.style.height = `${Math.min(area.scrollHeight, 160)}px`;
-  }, [text]);
+    area.style.height = `${Math.min(area.scrollHeight, 220)}px`;
+  }, [draft.text]);
+
+  // A response loaded from the details panel should be ready to review.
+  useEffect(() => {
+    if (draft.templateId) textRef.current?.focus();
+  }, [draft.templateId]);
 
   const send = () => {
-    const body = text.trim();
+    const body = draft.text.trim();
     if (!body || reply.isPending) return;
-    setText(""); // clear immediately; the pending bubble shows until the API confirms
-    reply.mutate(body, { onError: () => setText(body) });
+    const sent = draft;
+    setDraft({ text: "" }); // clear immediately; the pending bubble shows until the API confirms
+    reply.mutate({ text: body, templateId: draft.templateId }, { onError: () => setDraft(sent) });
+  };
+
+  const pick = (response: StandardResponse) => {
+    setPicker(null);
+    setDraft({ text: fillResponse(response, ticket.agent.name), templateId: response.id });
+    textRef.current?.focus();
   };
 
   return (
@@ -378,18 +493,14 @@ function Conversation({ ticket, now, onBack, showDetails, onToggleDetails }: { t
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h2 className="truncate text-sm font-semibold text-slate-950">{ticket.agent.name}</h2>
-            <StatusBadge status={ticket.status} className="hidden sm:inline-flex" />
+            {ticket.queryTypeLabel && <span className="hidden rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 sm:inline">{ticket.queryTypeLabel}</span>}
+            <SlaBadge ticket={ticket} now={now} />
           </div>
           <p className="truncate text-xs text-slate-500">
+            {ticket.agent.storeName ? `${ticket.agent.storeName} · ` : ""}
             {ticket.agent.phone} · <span className="font-mono">{ticket.reference}</span>
-            {ticket.region && ` · ${ticket.region}`}
           </p>
         </div>
-        {canAct && !closed && STATUS_TRANSITIONS[ticket.status].includes("RESOLVED") && (
-          <Button size="sm" variant="dark" onClick={() => changeStatus.mutate("RESOLVED")} loading={changeStatus.isPending} className="hidden sm:inline-flex">
-            <CheckCircle2 size={14} aria-hidden /> Resolve
-          </Button>
-        )}
         <button
           onClick={onToggleDetails}
           className="rounded-md p-2 text-slate-500 hover:bg-slate-100"
@@ -419,51 +530,84 @@ function Conversation({ ticket, now, onBack, showDetails, onToggleDetails }: { t
                     </span>
                   </div>
                 ) : (
-                  <Bubble message={item.message} />
+                  <Bubble message={item.message} templateTitle={item.message.templateId ? responseById.get(item.message.templateId)?.title : undefined} senderName={item.message.sender ? names.get(item.message.sender) : undefined} />
                 )}
               </Fragment>
             );
           })}
           {reply.isPending && reply.variables && (
-            <Bubble
-              message={{ id: "pending", direction: "OUTBOUND", body: reply.variables, state: "PENDING", simulated: false, createdAt: new Date(now || 0).toISOString() }}
-            />
+            <Bubble message={{ id: "pending", direction: "OUTBOUND", body: reply.variables.text, state: "PENDING", simulated: false, createdAt: new Date(now || 0).toISOString() }} />
           )}
         </div>
       </div>
 
-      <footer className="shrink-0 border-t border-slate-200 bg-white px-3 pb-3 pt-2.5 sm:px-5">
-        <WindowBanner open={window24.open} remainingMs={window24.remainingMs} />
+      <footer className="relative shrink-0 border-t border-slate-200 bg-white px-3 pb-3 pt-2.5 sm:px-5">
+        {bot ? (
+          <p className="mb-2 flex items-center gap-1.5 text-[11px] text-violet-700">
+            <Bot size={13} aria-hidden /> The bot is handling this ({BOT_STATE_LABEL[ticket.botState]?.toLowerCase()}). Replying takes the conversation over.
+          </p>
+        ) : (
+          <WindowBanner open={window24.open} remainingMs={window24.remainingMs} />
+        )}
         {!canAct ? (
           <p className="rounded-lg bg-slate-50 px-3 py-3 text-center text-sm text-slate-500">This ticket is assigned to {ticket.assignee}. Only they or a supervisor can reply.</p>
         ) : closed ? (
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2.5 text-sm text-slate-600">
-            <span>This case is {STATUS_LABEL[ticket.status].toLowerCase()}.</span>
+            <span>
+              {STATUS_LABEL[ticket.status]}
+              {ticket.outcome ? `: ${ticket.outcome}` : ""}.
+            </span>
             <Button size="sm" onClick={() => changeStatus.mutate("IN_PROGRESS")} loading={changeStatus.isPending}>
               Reopen case
             </Button>
           </div>
         ) : (
           <>
-            <div className="no-scrollbar mb-2 flex gap-1.5 overflow-x-auto">
-              {QUICK_REPLIES.map((quick) => (
-                <button
-                  key={quick}
-                  onClick={() => {
-                    setText(quick);
-                    textRef.current?.focus();
-                  }}
-                  className="shrink-0 rounded-full border border-slate-200 px-2.5 py-1 text-[11px] text-slate-600 hover:border-slate-300 hover:bg-slate-50"
-                >
-                  {quick.length > 34 ? `${quick.slice(0, 34)}…` : quick}
+            {picker && <ResponsePicker responses={responses} queryType={ticket.queryType} initialQuery={picker.query} onPick={pick} onClose={() => setPicker(null)} />}
+            {!draft.text && suggestions.length > 0 && (
+              <div className="no-scrollbar mb-2 flex items-center gap-1.5 overflow-x-auto">
+                <span className="shrink-0 text-[11px] font-medium text-slate-400">Suggested</span>
+                {suggestions.map((response) => (
+                  <button
+                    key={response.id}
+                    onClick={() => onUseResponse(response.id)}
+                    className="shrink-0 rounded-full border border-slate-200 px-2.5 py-1 text-[11px] text-slate-700 hover:border-amber-300 hover:bg-amber-50"
+                  >
+                    {response.title}
+                  </button>
+                ))}
+              </div>
+            )}
+            {template && (
+              <div className="mb-2 flex items-center gap-2 rounded-lg bg-slate-50 px-2.5 py-1.5">
+                <BookOpenText size={13} className="shrink-0 text-slate-400" aria-hidden />
+                <span className="truncate text-[11px] font-medium text-slate-700">{template.title}</span>
+                <EffectPill response={template} className="min-w-0" />
+                <button onClick={() => setDraft({ text: draft.text })} className="ml-auto shrink-0 rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700" aria-label="Send as a plain message (no status change)" title="Send as a plain message (no status change)">
+                  <X size={13} />
                 </button>
-              ))}
-            </div>
+              </div>
+            )}
             <div className="flex items-end gap-2 rounded-xl border border-slate-200 bg-white p-1.5 focus-within:border-amber-400 focus-within:ring-2 focus-within:ring-amber-200">
+              <button
+                onClick={() => setPicker({ query: "" })}
+                className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+                aria-label="Standard responses"
+                title="Standard responses ( / )"
+              >
+                <BookOpenText size={18} />
+              </button>
               <textarea
                 ref={textRef}
-                value={text}
-                onChange={(event) => setText(event.target.value)}
+                value={draft.text}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (value.startsWith("/") && !draft.text) {
+                    setPicker({ query: value.slice(1) });
+                    return;
+                  }
+                  setDraft({ ...draft, text: value });
+                }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
@@ -471,20 +615,20 @@ function Conversation({ ticket, now, onBack, showDetails, onToggleDetails }: { t
                   }
                 }}
                 rows={1}
-                placeholder={`Reply to ${ticket.agent.name.split(" ")[0]}…`}
+                placeholder={`Reply to ${ticket.agent.name.split(" ")[0]}… type / for standard responses`}
                 aria-label="Reply message"
-                className="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-2.5 py-2 text-sm outline-none placeholder:text-slate-400"
+                className="max-h-56 min-h-9 flex-1 resize-none bg-transparent px-1 py-2 text-sm outline-none placeholder:text-slate-400"
               />
               <button
                 onClick={send}
-                disabled={!text.trim() || reply.isPending}
+                disabled={!draft.text.trim() || reply.isPending}
                 className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brand text-slate-950 transition hover:bg-brand-strong disabled:opacity-40"
                 aria-label="Send reply"
               >
                 <SendHorizontal size={17} />
               </button>
             </div>
-            <p className="mt-1.5 hidden text-[11px] text-slate-400 sm:block">Enter to send · Shift + Enter for a new line</p>
+            <p className="mt-1.5 hidden text-[11px] text-slate-400 sm:block">Enter to send · Shift + Enter for a new line · / for standard responses</p>
           </>
         )}
         {(reply.error || changeStatus.error) && (
@@ -509,20 +653,46 @@ function WindowBanner({ open, remainingMs }: { open: boolean; remainingMs: numbe
   );
 }
 
-function Bubble({ message }: { message: Message }) {
+function Bubble({ message, templateTitle, senderName }: { message: Message; templateTitle?: string; senderName?: string }) {
   const outbound = message.direction === "OUTBOUND";
-  const internal = message.direction === "INTERNAL";
+  const fromBot = message.sender === "bot";
+  const options = message.interactive?.options ?? [];
   return (
     <div className={cn("flex", outbound ? "justify-end" : "justify-start")}>
       <div
         className={cn(
           "relative max-w-[85%] rounded-xl px-3 pb-1.5 pt-2 text-sm shadow-[0_1px_0.5px_rgba(15,23,42,0.13)] sm:max-w-[70%]",
-          outbound ? "rounded-tr-sm bg-bubble-out" : internal ? "bg-violet-50 ring-1 ring-violet-200" : "rounded-tl-sm bg-white",
+          fromBot ? "rounded-tr-sm bg-violet-50 ring-1 ring-violet-100" : outbound ? "rounded-tr-sm bg-bubble-out" : "rounded-tl-sm bg-white",
         )}
       >
-        {internal && <p className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-700">Internal note</p>}
+        {fromBot ? (
+          <p className="mb-0.5 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-violet-700">
+            <Bot size={11} aria-hidden /> GSM Bot
+          </p>
+        ) : outbound && senderName ? (
+          <p className="mb-0.5 text-[10px] font-semibold text-amber-800">{senderName}</p>
+        ) : null}
+        {message.mediaType && (
+          <div className="mb-1.5 flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-4 text-xs text-slate-500">
+            <ImageIcon size={18} aria-hidden /> {message.mediaType === "image" ? "Photo" : message.mediaType}
+          </div>
+        )}
         <p className="whitespace-pre-wrap break-words text-slate-900">{message.body}</p>
+        {options.length > 0 && (
+          <ul className="mt-2 space-y-1 border-t border-violet-200/70 pt-2" aria-label="Menu options sent">
+            {options.map((option, index) => (
+              <li key={option.id} className="rounded-md bg-white/80 px-2 py-1 text-center text-xs font-medium text-sky-700">
+                {index + 1}. {option.title}
+              </li>
+            ))}
+          </ul>
+        )}
         <div className="mt-0.5 flex items-center justify-end gap-1 text-[10px] text-slate-500">
+          {templateTitle && !fromBot && (
+            <span className="mr-1 flex items-center gap-0.5 rounded bg-slate-900/5 px-1 font-medium" title={`Standard response: ${templateTitle}`}>
+              <BookOpenText size={9} aria-hidden /> {templateTitle}
+            </span>
+          )}
           {message.simulated && <span className="mr-1 rounded bg-slate-900/5 px-1 font-medium uppercase tracking-wide">Sim</span>}
           <time dateTime={message.createdAt}>{shortTime(message.createdAt)}</time>
           {outbound && <DeliveryState state={message.state} />}
@@ -546,77 +716,92 @@ function DeliveryState({ state }: { state: string }) {
 
 /* ---------------- details ---------------- */
 
-function Details({ ticket, now, onClose }: { ticket: Ticket; now: number; onClose: () => void }) {
+function Details({ ticket, now, onClose, onUseResponse }: { ticket: Ticket; now: number; onClose: () => void; onUseResponse: (responseId: string) => void }) {
   const { identity, isSupervisor } = useIdentity();
   const dashboard = useDashboard();
   const tickets = useTickets();
+  const queryTypes = useQueryTypes();
   const names = useNames();
   const changeStatus = useChangeStatus(ticket.id);
   const reassign = useReassign(ticket.id);
+  const updateCase = useUpdateCase(ticket.id);
   const canAct = isSupervisor || ticket.assignedUserId === identity.id;
   const transitions = STATUS_TRANSITIONS[ticket.status];
   const agentTickets = (tickets.data ?? []).filter((item) => item.agent.phone === ticket.agent.phone);
   const firstResponse = ticket.firstResponseAt ? new Date(ticket.firstResponseAt).getTime() - new Date(ticket.createdAt).getTime() : null;
   const staff = dashboard.data?.workload ?? [];
+  const pinReset = ticket.queryType === "PIN_RESET";
 
   return (
-    <aside className="fixed inset-y-0 right-0 z-30 flex w-[min(340px,100vw)] flex-col border-l border-slate-200 bg-white shadow-xl xl:static xl:z-auto xl:shadow-none">
+    <aside className="fixed inset-y-0 right-0 z-30 flex w-[min(380px,100vw)] flex-col border-l border-slate-200 bg-white shadow-xl xl:static xl:z-auto xl:shadow-none">
       <div className="flex h-16 shrink-0 items-center justify-between border-b border-slate-200 px-5">
-        <h2 className="text-sm font-semibold text-slate-900">Case details</h2>
+        <div>
+          <h2 className="text-sm font-semibold text-slate-900">Case details</h2>
+          <p className="font-mono text-[11px] text-slate-400">{ticket.reference}</p>
+        </div>
         <button onClick={onClose} className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 xl:hidden" aria-label="Close details">
           <X size={18} />
         </button>
       </div>
 
       <div className="scrollbar-thin flex-1 space-y-6 overflow-y-auto p-5">
-        <section>
-          <p className="text-xs font-medium text-slate-400">Subject</p>
-          <p className="mt-1 text-sm text-slate-900">{ticket.subject}</p>
-        </section>
+        <SlaCard ticket={ticket} now={now} />
 
         <section className="grid grid-cols-2 gap-4">
           <div>
             <p className="text-xs font-medium text-slate-400">Status</p>
             <div className="mt-1.5">
-              <StatusBadge status={ticket.status} />
+              {withBot(ticket) ? (
+                <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-700 ring-1 ring-inset ring-violet-200">
+                  <Bot size={11} aria-hidden /> With bot
+                </span>
+              ) : (
+                <StatusBadge status={ticket.status} />
+              )}
             </div>
           </div>
           <div>
-            <p className="text-xs font-medium text-slate-400">Reference</p>
-            <p className="mt-1.5 font-mono text-sm text-slate-900">{ticket.reference}</p>
+            <label htmlFor="query-type" className="text-xs font-medium text-slate-400">
+              Query type
+            </label>
+            {canAct && isOpen(ticket) ? (
+              <select
+                id="query-type"
+                value={ticket.queryType ?? ""}
+                disabled={updateCase.isPending}
+                onChange={(event) => event.target.value && updateCase.mutate({ queryType: event.target.value })}
+                className={cn(inputClass, "mt-1 px-2 py-1 text-xs")}
+              >
+                <option value="">Not set</option>
+                {(queryTypes.data ?? []).map((type) => (
+                  <option key={type.key} value={type.key}>
+                    {type.label}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <p className="mt-1.5 text-sm text-slate-900">{ticket.queryTypeLabel ?? "Not set"}</p>
+            )}
           </div>
         </section>
 
-        {canAct && (
+        {ticket.outcome && (
+          <section className={cn("rounded-lg px-3 py-2 text-[13px]", ticket.status === "RESOLVED" ? "bg-emerald-50 text-emerald-900" : "bg-slate-50 text-slate-700")}>
+            <p className="text-[11px] font-medium opacity-70">Outcome</p>
+            <p className="flex items-center gap-1.5 font-medium">
+              {ticket.status === "RESOLVED" && <CheckCircle2 size={14} aria-hidden />} {ticket.outcome}
+            </p>
+          </section>
+        )}
+
+        {ticket.status === "ESCALATED" && <EscalationCard ticket={ticket} />}
+
+        {pinReset && !withBot(ticket) && <PinResetWorkspace ticket={ticket} canAct={canAct} onUseResponse={onUseResponse} />}
+
+        {(pinReset || ticket.details.msisdn) && (
           <section>
-            <label className="text-xs font-medium text-slate-400" htmlFor="status-change">
-              Move to
-            </label>
-            <div className="mt-1.5 flex flex-wrap gap-1.5">
-              {transitions.map((status) => (
-                <button
-                  key={status}
-                  id={status === transitions[0] ? "status-change" : undefined}
-                  disabled={changeStatus.isPending}
-                  onClick={() => changeStatus.mutate(status as TicketStatus)}
-                  className={cn(
-                    "rounded-lg border px-2.5 py-1.5 text-xs font-medium transition disabled:opacity-50",
-                    status === "ESCALATED"
-                      ? "border-red-200 text-red-700 hover:bg-red-50"
-                      : status === "RESOLVED"
-                        ? "border-emerald-200 text-emerald-700 hover:bg-emerald-50"
-                        : "border-slate-200 text-slate-700 hover:bg-slate-50",
-                  )}
-                >
-                  {STATUS_LABEL[status]}
-                </button>
-              ))}
-            </div>
-            {changeStatus.error && (
-              <div className="mt-2">
-                <ErrorNotice error={changeStatus.error} />
-              </div>
-            )}
+            <p className="mb-2 text-xs font-medium text-slate-400">Daily log fields</p>
+            <LogFields ticket={ticket} canAct={canAct} />
           </section>
         )}
 
@@ -626,7 +811,7 @@ function Details({ ticket, now, onClose }: { ticket: Ticket; now: number; onClos
             {ticket.assignedUserId ? <Avatar name={ticket.assignee} size={28} /> : <span className="h-7 w-7 rounded-full border border-dashed border-slate-300" />}
             <span className="text-sm text-slate-900">{ticket.assignee}</span>
           </div>
-          {isSupervisor && (
+          {isSupervisor && isOpen(ticket) && (
             <div className="mt-3">
               <select
                 aria-label="Reassign ticket"
@@ -635,7 +820,7 @@ function Details({ ticket, now, onClose }: { ticket: Ticket; now: number; onClos
                 onChange={(event) => event.target.value && reassign.mutate(event.target.value)}
                 className={cn(inputClass, "py-1.5 text-xs")}
               >
-                <option value="">Reassign to…</option>
+                <option value="">{ticket.assignedUserId ? "Reassign to…" : "Assign to…"}</option>
                 {staff
                   .filter((member) => member.id !== ticket.assignedUserId)
                   .map((member) => (
@@ -653,15 +838,48 @@ function Details({ ticket, now, onClose }: { ticket: Ticket; now: number; onClos
           )}
         </section>
 
+        {canAct && !withBot(ticket) && (
+          <details className="group">
+            <summary className="cursor-pointer list-none text-xs font-medium text-slate-400 hover:text-slate-600">
+              Change status manually <span className="text-slate-300 group-open:hidden">▸</span>
+            </summary>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {transitions.map((status) => (
+                <button
+                  key={status}
+                  disabled={changeStatus.isPending}
+                  onClick={() => changeStatus.mutate(status as TicketStatus)}
+                  className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+                >
+                  {STATUS_LABEL[status]}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1.5 text-[11px] text-slate-400">Prefer standard responses: they record the outcome for the daily log.</p>
+            {changeStatus.error && (
+              <div className="mt-2">
+                <ErrorNotice error={changeStatus.error} />
+              </div>
+            )}
+          </details>
+        )}
+
         <section className="rounded-xl border border-slate-200 p-4">
           <div className="flex items-center gap-3">
             <Avatar name={ticket.agent.name} size={40} />
             <div className="min-w-0">
               <p className="truncate text-sm font-medium text-slate-900">{ticket.agent.name}</p>
-              <p className="text-xs text-slate-500">Field agent</p>
+              <p className="text-xs text-slate-500">{ticket.agent.shopType ?? "Field"} agent</p>
             </div>
           </div>
           <dl className="mt-3 space-y-2 text-sm">
+            {ticket.agent.storeName && (
+              <div className="flex items-center gap-2 text-slate-600">
+                <Store size={14} className="text-slate-400" aria-hidden />
+                <dt className="sr-only">Store</dt>
+                <dd>{ticket.agent.storeName}</dd>
+              </div>
+            )}
             <div className="flex items-center gap-2 text-slate-600">
               <Phone size={14} className="text-slate-400" aria-hidden />
               <dt className="sr-only">Phone</dt>
@@ -688,9 +906,12 @@ function Details({ ticket, now, onClose }: { ticket: Ticket; now: number; onClos
               <dd className="mt-0.5 font-medium text-slate-900">{firstResponse === null ? "Awaiting" : formatDuration(firstResponse)}</dd>
             </div>
             <div className="rounded-lg bg-slate-50 p-3">
-              <dt className="text-[11px] text-slate-500">{isOpen(ticket) ? "Open for" : "Resolved after"}</dt>
+              <dt className="text-[11px] text-slate-500">{isOpen(ticket) ? "Open for" : "Handled in"}</dt>
               <dd className="mt-0.5 font-medium text-slate-900">
-                {formatDuration((ticket.resolvedAt && !isOpen(ticket) ? new Date(ticket.resolvedAt).getTime() : now) - new Date(ticket.createdAt).getTime())}
+                {formatDuration(
+                  (isOpen(ticket) ? now : new Date(ticket.details.executedAt ?? ticket.resolvedAt ?? ticket.closedAt ?? ticket.lastMessageAt).getTime()) -
+                    new Date(ticket.createdAt).getTime(),
+                )}
               </dd>
             </div>
           </dl>
@@ -699,15 +920,18 @@ function Details({ ticket, now, onClose }: { ticket: Ticket; now: number; onClos
         <section>
           <p className="mb-3 text-xs font-medium text-slate-400">Activity</p>
           <ol className="relative space-y-3 border-l border-slate-200 pl-4">
-            {[...ticket.audit].reverse().map((event) => (
-              <li key={event.id} className="relative">
-                <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full border-2 border-white bg-slate-300" aria-hidden />
-                <p className="text-[13px] text-slate-800">{describeAudit(event.type, event.metadata, names)}</p>
-                <p className="text-[11px] text-slate-400">
-                  {names.get(event.actor) ?? event.actor} · {timeAgo(event.createdAt, now)}
-                </p>
-              </li>
-            ))}
+            {[...ticket.audit]
+              .filter((event) => event.type !== "MESSAGE_SENT")
+              .reverse()
+              .map((event) => (
+                <li key={event.id} className="relative">
+                  <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full border-2 border-white bg-slate-300" aria-hidden />
+                  <p className="text-[13px] text-slate-800">{describeAudit(event.type, event.metadata, names)}</p>
+                  <p className="text-[11px] text-slate-400">
+                    {names.get(event.actor) ?? event.actor} · {timeAgo(event.createdAt, now)}
+                  </p>
+                </li>
+              ))}
           </ol>
         </section>
       </div>

@@ -48,23 +48,30 @@ async function main() {
 
   await prisma.fieldAgent.upsert({
     where: { phone: '+260970000001' },
-    update: {},
+    update: {
+      storeName: 'Manda Hill Connect Store',
+      shopType: 'Connect Store',
+    },
     create: {
       name: 'Joseph Tembo',
       phone: '+260970000001',
       employeeId: 'FA-001',
       region: 'Lusaka',
+      storeName: 'Manda Hill Connect Store',
+      shopType: 'Connect Store',
       teamId: team.id,
     },
   });
   await prisma.fieldAgent.upsert({
     where: { phone: '+260970000002' },
-    update: {},
+    update: { storeName: 'Kitwe Container 3', shopType: 'Container' },
     create: {
       name: 'Ruth Phiri',
       phone: '+260970000002',
       employeeId: 'FA-002',
       region: 'Copperbelt',
+      storeName: 'Kitwe Container 3',
+      shopType: 'Container',
       teamId: team.id,
     },
   });

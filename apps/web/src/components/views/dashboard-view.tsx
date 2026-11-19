@@ -4,10 +4,11 @@ import { ArrowRight, Inbox } from "lucide-react";
 import Link from "next/link";
 import { useMemo } from "react";
 import { useDashboard, useReports, useTickets } from "@/lib/api";
-import { awaitingReply, formatDuration, isOpen, STATUS_LABEL } from "@/lib/format";
+import { awaitingReply, formatDuration, isOpen, slaState, STATUS_LABEL, withBot } from "@/lib/format";
 import { useIdentity } from "@/lib/identity";
 import { useNow } from "@/lib/use-now";
 import { BarList, DateColumns, lastNDays, Meter, StatTile } from "../charts";
+import { SlaBadge } from "../inbox";
 import { Avatar, Card, EmptyState, ErrorNotice, PageHeader, Skeleton, StatusBadge } from "../ui";
 
 function greeting(hour: number) {
@@ -21,7 +22,7 @@ export function DashboardView() {
   const tickets = useTickets();
   const dashboard = useDashboard();
   const reports = useReports();
-  const now = useNow();
+  const now = useNow(1_000);
 
   const all = useMemo(() => tickets.data ?? [], [tickets.data]);
   const mine = isSupervisor ? all : all.filter((ticket) => ticket.assignedUserId === identity.id);
@@ -49,6 +50,8 @@ export function DashboardView() {
   const avgFirstResponseMs = responded.length
     ? responded.reduce((sum, ticket) => sum + (new Date(ticket.firstResponseAt!).getTime() - new Date(ticket.createdAt).getTime()), 0) / responded.length
     : null;
+
+  const breached = now ? mine.filter((ticket) => slaState(ticket, now).level === "breached").length : 0;
 
   const firstName = identity.name.split(" ")[0];
   const loading = tickets.isPending || dashboard.isPending;
@@ -100,8 +103,17 @@ export function DashboardView() {
         </div>
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-2 xl:grid-cols-4">
           <StatTile label="Needs reply" value={loading ? "…" : mine.filter(awaitingReply).length} hint="Last message from agent" />
-          <StatTile label="Unassigned" value={loading ? "…" : mine.filter((ticket) => ticket.status === "UNASSIGNED").length} tone={mine.some((ticket) => ticket.status === "UNASSIGNED") ? "warning" : undefined} hint="No staff available" />
-          <StatTile label="Escalated" value={loading ? "…" : mine.filter((ticket) => ticket.status === "ESCALATED").length} tone={mine.some((ticket) => ticket.status === "ESCALATED") ? "critical" : undefined} hint="Needs senior attention" />
+          <StatTile
+            label="SLA breached"
+            value={loading ? "…" : breached}
+            tone={breached ? "critical" : "good"}
+            hint={breached ? "Open cases past their SLA" : "All open cases within SLA"}
+          />
+          <StatTile
+            label={isSupervisor ? "With the bot" : "Escalated"}
+            value={loading ? "…" : isSupervisor ? mine.filter(withBot).length : mine.filter((ticket) => ticket.status === "ESCALATED").length}
+            hint={isSupervisor ? "Agents choosing a query type" : "Awaiting email feedback"}
+          />
           <StatTile
             label="Avg first response"
             value={loading ? "…" : avgFirstResponseMs === null ? "—" : formatDuration(avgFirstResponseMs)}
@@ -142,7 +154,10 @@ export function DashboardView() {
                       <p className="truncate text-xs text-slate-500">{ticket.messages.at(-1)?.body ?? ticket.subject}</p>
                     </div>
                     <div className="hidden text-right sm:block">
-                      <StatusBadge status={ticket.status} />
+                      <div className="flex items-center justify-end gap-1.5">
+                        {now ? <SlaBadge ticket={ticket} now={now} /> : null}
+                        <StatusBadge status={ticket.status} />
+                      </div>
                       <p className="mt-1 text-[11px] text-slate-400">{ticket.assignee}</p>
                     </div>
                     <span className="w-16 shrink-0 text-right text-xs font-medium text-amber-700">

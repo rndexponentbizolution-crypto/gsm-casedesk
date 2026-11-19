@@ -72,6 +72,8 @@ model FieldAgent {
   phone       String   @unique
   employeeId  String?
   region      String?
+  storeName   String?
+  shopType    String?
   teamId      String?
   active      Boolean  @default(true)
   contacts    WhatsAppContact[]
@@ -95,6 +97,9 @@ model Conversation {
   contact   WhatsAppContact @relation(fields: [contactId], references: [id])
   tickets   Ticket[]
   messages  Message[]
+  /// Where the WhatsApp bot is in the entry flow: IDLE, MENU, OTHER_MENU, AWAITING_PIN_DETAILS, WITH_AGENT
+  botState  String   @default("IDLE")
+  botUpdatedAt DateTime?
   createdAt DateTime @default(now())
 }
 
@@ -109,6 +114,15 @@ model Ticket {
   status      TicketStatus @default(NEW)
   priority    Int      @default(2)
   escalation  Boolean  @default(false)
+  /// Query type key (see src/query-types.ts), set by the bot or staff
+  queryType   String?
+  tags        String[] @default([])
+  slaDueAt    DateTime?
+  acknowledgedAt DateTime?
+  /// Final outcome label, e.g. "Successful PIN reset" or "Escalated: PIN Reset Above Threshold"
+  outcome     String?
+  /// Casework: log fields, validation/verification checklists, escalation details
+  details     Json?
   firstResponseAt DateTime?
   resolvedAt  DateTime?
   closedAt    DateTime?
@@ -121,6 +135,7 @@ model Ticket {
 
   @@index([status, teamId])
   @@index([lastMessageAt])
+  @@index([queryType, status])
 }
 
 model TicketAssignment {
@@ -159,6 +174,12 @@ model Message {
   body          String?
   state         MessageState @default(PENDING)
   isSimulated   Boolean @default(false)
+  /// "bot", "system", or the staff member's keycloakId for outbound messages
+  sender        String?
+  templateId    String?
+  /// Interactive payload (list/buttons) sent with the message, or the reply id received
+  interactive   Json?
+  mediaType     String?
   createdAt     DateTime @default(now())
   attachments   Attachment[]
 

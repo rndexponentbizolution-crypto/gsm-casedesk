@@ -21,8 +21,51 @@ export type Message = {
   body: string;
   state: string;
   simulated: boolean;
+  /** "bot", "system", or the staff member's id */
+  sender?: string | null;
+  templateId?: string | null;
+  interactive?: { type?: "list"; button?: string; options?: MenuOption[]; replyId?: string } | null;
+  mediaType?: string | null;
   createdAt: string;
 };
+
+export type MenuOption = { id: string; title: string };
+
+export type BotState = "IDLE" | "MENU" | "OTHER_MENU" | "AWAITING_PIN_DETAILS" | "WITH_AGENT";
+
+export type CaseDetails = {
+  msisdn?: string;
+  nrcNumber?: string;
+  region?: string;
+  locationName?: string;
+  shopType?: string;
+  balanceZmw?: number | null;
+  validation?: Record<string, boolean>;
+  verification?: Record<string, boolean>;
+  resolved?: boolean;
+  executedAt?: string;
+  escalation?: { subject: string; attachments: string[]; email: string; escalatedAt: string; dueAt: string; queryType?: string };
+};
+
+export type ResponseEffect =
+  | { kind: "acknowledge" }
+  | { kind: "resolve"; outcome: string }
+  | { kind: "close"; outcome: string }
+  | { kind: "pending"; outcome: string }
+  | { kind: "escalate"; subject: string; attachments: string[]; queryType?: string; slaHours: number }
+  | { kind: "redirect_email" }
+  | { kind: "info" };
+
+export type StandardResponse = {
+  id: string;
+  title: string;
+  category: string;
+  body: string;
+  effect: ResponseEffect;
+  queryTypes?: string[];
+};
+
+export type QueryType = { key: string; label: string; handledOnWhatsApp: boolean; slaMinutes: number | null; level: "FIRST" | "ESCALATED" };
 
 export type AuditEvent = {
   id: string;
@@ -42,11 +85,20 @@ export type Ticket = {
   assignee: string;
   team: string;
   region: string;
+  queryType: string | null;
+  queryTypeLabel: string | null;
+  tags: string[];
+  slaDueAt: string | null;
+  acknowledgedAt: string | null;
+  outcome: string | null;
+  details: CaseDetails;
+  botState: BotState;
   firstResponseAt: string | null;
   resolvedAt: string | null;
+  closedAt?: string | null;
   createdAt: string;
   lastMessageAt: string;
-  agent: { id: string; name: string; phone: string };
+  agent: { id: string; name: string; phone: string; region?: string | null; storeName?: string | null; shopType?: string | null };
   messages: Message[];
   audit: AuditEvent[];
 };
@@ -61,6 +113,8 @@ export type Dashboard = {
   assigned: number;
   escalated: number;
   resolved: number;
+  withBot?: number;
+  slaBreached?: number;
   failedOutbound: number;
   stuckInbound: number;
   workload: Workload[];
@@ -77,6 +131,11 @@ export type Report = {
   averageResolutionMinutes: number;
   escalations: number;
   unassignedCases: number;
+  slaBreachedOpen?: number;
+  pinResetsHandled?: number;
+  pinResetsWithinSla?: number;
+  byQueryType?: Record<string, number>;
+  outcomes?: Record<string, number>;
   assignmentDistribution: Array<{ name: string; tickets: number }>;
   casesByRegion: Record<string, number>;
   inboundByDate: Record<string, number>;
@@ -89,6 +148,8 @@ export type FieldAgent = {
   phone: string;
   region: string | null;
   employeeId: string | null;
+  storeName?: string | null;
+  shopType?: string | null;
   active: boolean;
 };
 
@@ -140,7 +201,8 @@ export function useTickets() {
   return useQuery({
     queryKey: ["tickets", identity.id],
     queryFn: () => apiFetch<Ticket[]>("/api/tickets", identity),
-    refetchInterval: 15_000,
+    // PIN resets carry a 5-minute SLA, so keep the queue fresh.
+    refetchInterval: 8_000,
   });
 }
 
@@ -168,6 +230,22 @@ export function useFieldAgents() {
     queryKey: ["field-agents"],
     queryFn: () => apiFetch<FieldAgent[]>("/api/field-agents", null),
     staleTime: 60_000,
+  });
+}
+
+export function useResponses() {
+  return useQuery({
+    queryKey: ["responses"],
+    queryFn: () => apiFetch<StandardResponse[]>("/api/responses", null),
+    staleTime: Infinity,
+  });
+}
+
+export function useQueryTypes() {
+  return useQuery({
+    queryKey: ["query-types"],
+    queryFn: () => apiFetch<QueryType[]>("/api/query-types", null),
+    staleTime: Infinity,
   });
 }
 
@@ -217,8 +295,8 @@ export function useReply(ticketId: string) {
   const { identity } = useIdentity();
   const afterWrite = useAfterWrite();
   return useMutation({
-    mutationFn: (text: string) =>
-      apiFetch<Ticket>(`/api/tickets/${ticketId}/reply`, identity, { method: "POST", body: JSON.stringify({ text }) }),
+    mutationFn: (input: { text: string; templateId?: string }) =>
+      apiFetch<Ticket>(`/api/tickets/${ticketId}/reply`, identity, { method: "POST", body: JSON.stringify(input) }),
     onSuccess: (ticket) => afterWrite(ticket),
   });
 }
@@ -243,11 +321,23 @@ export function useReassign(ticketId: string) {
   });
 }
 
+export function useUpdateCase(ticketId: string) {
+  const { identity } = useIdentity();
+  const afterWrite = useAfterWrite();
+  return useMutation({
+    mutationFn: (patch: { queryType?: string; details?: Partial<CaseDetails> }) =>
+      apiFetch<Ticket>(`/api/tickets/${ticketId}/case`, identity, { method: "PATCH", body: JSON.stringify(patch) }),
+    onSuccess: (ticket) => afterWrite(ticket),
+  });
+}
+
+export type InboundInput = { phone: string; text?: string; replyId?: string; mediaType?: string };
+
 export function useSimulateInbound() {
   const afterWrite = useAfterWrite();
   return useMutation({
-    mutationFn: (input: { phone: string; text: string }) =>
-      apiFetch<{ ticketId: string | null; reference: string | null; duplicate: boolean }>("/api/simulator/inbound", null, {
+    mutationFn: (input: InboundInput) =>
+      apiFetch<{ ticketId: string | null; reference: string | null; duplicate: boolean; botState?: BotState }>("/api/simulator/inbound", null, {
         method: "POST",
         body: JSON.stringify(input),
       }),
@@ -255,12 +345,20 @@ export function useSimulateInbound() {
   });
 }
 
-export async function downloadReportCsv(identity: Identity) {
-  const csv = await apiFetch<string>("/api/reports.csv", identity);
+function saveCsv(csv: string, filename: string) {
   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `gsm-casedesk-report-${new Date().toISOString().slice(0, 10)}.csv`;
+  anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+export async function downloadReportCsv(identity: Identity) {
+  saveCsv(await apiFetch<string>("/api/reports.csv", identity), `gsm-casedesk-report-${new Date().toISOString().slice(0, 10)}.csv`);
+}
+
+/** SOP Step 6 daily log for one day (YYYY-MM-DD). */
+export async function downloadDailyLog(identity: Identity, day: string) {
+  saveCsv(await apiFetch<string>(`/api/reports/daily-log.csv?date=${encodeURIComponent(day)}`, identity), `gsm-daily-log-${day}.csv`);
 }
