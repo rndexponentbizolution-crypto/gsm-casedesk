@@ -3,14 +3,13 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ValidationPipe } from '@nestjs/common';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { allowedOrigins } from './cors';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-  app.enableCors({
-    origin: process.env.WEB_ORIGIN
-      ? [process.env.WEB_ORIGIN]
-      : ['http://localhost:3000'],
-  });
+  const origins = allowedOrigins();
+  app.enableCors({ origin: origins });
+  console.log(`CORS allowed origins: ${origins.join(', ')}`);
   app.use(helmet());
   app.useGlobalPipes(
     new ValidationPipe({
