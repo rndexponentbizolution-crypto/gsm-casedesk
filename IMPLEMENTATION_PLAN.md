@@ -1,0 +1,25 @@
+# GSM CaseDesk Implementation Plan
+
+## Phase status
+- [x] Foundation: monorepo, Prisma foundation, authentication configuration, documentation
+- [x] Core case management: scoped in-memory development services, field agents, tickets, routing
+- [x] Messaging: simulator and persistent-database-ready outbox/schema
+- [x] Real-time inbox: responsive three-column UI and live API refresh
+- [x] Supervision: scoped dashboard metrics, report data and authorised CSV export
+- [ ] Reliability and security: basic tests and Compose exist; PostgreSQL/Keycloak/live WhatsApp require infrastructure
+
+## Architecture
+- `apps/web`: Next.js TypeScript dashboard
+- `apps/api`: NestJS REST and WebSocket API
+- `packages/shared`: shared enums, types and Zod schemas
+- `infrastructure`: PostgreSQL, Redis, MinIO and Keycloak Compose configuration
+- `scripts`: setup, migrations and seed helpers
+- `tests`: integration and end-to-end coverage
+
+## Implementation approach
+1. Establish npm workspaces and local services.
+2. Build the PostgreSQL/Prisma foundation and synthetic seed data.
+3. Implement deny-by-default, team-scoped APIs and routing.
+4. Add persistent webhook/outbox processing and the official Meta adapter.
+5. Build the three-column inbox and supervisor views.
+6. Add negative access tests, reliability tests and production documentation.

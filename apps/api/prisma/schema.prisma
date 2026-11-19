@@ -1,0 +1,227 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoleName {
+  BACK_OFFICE
+  SUPERVISOR
+  ADMINISTRATOR
+}
+
+enum TicketStatus {
+  NEW
+  UNASSIGNED
+  ASSIGNED
+  IN_PROGRESS
+  PENDING_INFORMATION
+  ESCALATED
+  RESOLVED
+  CLOSED
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+  INTERNAL
+}
+
+enum MessageState {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  AMBIGUOUS
+}
+
+model Team {
+  id       String   @id @default(uuid())
+  name     String   @unique
+  region   String?
+  users    User[]
+  tickets  Ticket[]
+  createdAt DateTime @default(now())
+}
+
+model User {
+  id        String   @id @default(uuid())
+  keycloakId String  @unique
+  name      String
+  email     String   @unique
+  role      RoleName
+  active    Boolean  @default(true)
+  teamId    String?
+  team      Team?    @relation(fields: [teamId], references: [id])
+  capacity  Int      @default(20)
+  availability Boolean @default(true)
+  assignments TicketAssignment[]
+  auditEvents AuditEvent[]
+  createdAt DateTime @default(now())
+
+  @@index([teamId, active])
+}
+
+model FieldAgent {
+  id          String   @id @default(uuid())
+  name        String
+  phone       String   @unique
+  employeeId  String?
+  region      String?
+  teamId      String?
+  active      Boolean  @default(true)
+  contacts    WhatsAppContact[]
+  createdAt   DateTime @default(now())
+
+  @@index([active, region])
+}
+
+model WhatsAppContact {
+  id        String   @id @default(uuid())
+  fieldAgentId String
+  fieldAgent FieldAgent @relation(fields: [fieldAgentId], references: [id])
+  phone     String   @unique
+  conversation Conversation?
+  createdAt DateTime @default(now())
+}
+
+model Conversation {
+  id        String   @id @default(uuid())
+  contactId String   @unique
+  contact   WhatsAppContact @relation(fields: [contactId], references: [id])
+  tickets   Ticket[]
+  messages  Message[]
+  createdAt DateTime @default(now())
+}
+
+model Ticket {
+  id          String   @id @default(uuid())
+  reference   String   @unique
+  conversationId String
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+  teamId      String?
+  team        Team?    @relation(fields: [teamId], references: [id])
+  subject     String
+  status      TicketStatus @default(NEW)
+  priority    Int      @default(2)
+  escalation  Boolean  @default(false)
+  firstResponseAt DateTime?
+  resolvedAt  DateTime?
+  closedAt    DateTime?
+  lastMessageAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+  assignments TicketAssignment[]
+  messages    Message[]
+  auditEvents AuditEvent[]
+  statusHistory TicketStatusHistory[]
+
+  @@index([status, teamId])
+  @@index([lastMessageAt])
+}
+
+model TicketAssignment {
+  id       String @id @default(uuid())
+  ticketId String
+  ticket   Ticket @relation(fields: [ticketId], references: [id])
+  userId   String
+  user     User @relation(fields: [userId], references: [id])
+  active   Boolean @default(true)
+  reason   String
+  createdAt DateTime @default(now())
+
+  @@index([ticketId, active])
+  @@index([userId, active])
+}
+
+model TicketStatusHistory {
+  id        String @id @default(uuid())
+  ticketId  String
+  ticket    Ticket @relation(fields: [ticketId], references: [id])
+  fromStatus TicketStatus?
+  toStatus TicketStatus
+  actorId   String?
+  reason    String?
+  createdAt DateTime @default(now())
+}
+
+model Message {
+  id            String @id @default(uuid())
+  providerId    String? @unique
+  ticketId      String
+  ticket        Ticket @relation(fields: [ticketId], references: [id])
+  conversationId String
+  conversation  Conversation @relation(fields: [conversationId], references: [id])
+  direction     MessageDirection
+  body          String?
+  state         MessageState @default(PENDING)
+  isSimulated   Boolean @default(false)
+  createdAt     DateTime @default(now())
+  attachments   Attachment[]
+
+  @@index([ticketId, createdAt])
+  @@index([providerId])
+}
+
+model Attachment {
+  id        String @id @default(uuid())
+  messageId String
+  message   Message @relation(fields: [messageId], references: [id])
+  providerMediaId String?
+  storageKey String?
+  name      String
+  mimeType  String
+  size      Int
+  scanStatus String @default("PENDING")
+  createdAt DateTime @default(now())
+
+  @@index([messageId])
+}
+
+model InboundWebhookEvent {
+  id          String @id @default(uuid())
+  providerId  String @unique
+  rawPayload  Json
+  status      String @default("RECEIVED")
+  retryCount  Int @default(0)
+  error       String?
+  processedAt DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([status, createdAt])
+}
+
+model OutboundMessageOutbox {
+  id          String @id @default(uuid())
+  messageId   String @unique
+  providerId  String?
+  payload     Json
+  status      String @default("PENDING")
+  retryCount  Int @default(0)
+  nextAttemptAt DateTime @default(now())
+  error       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status, nextAttemptAt])
+}
+
+model AuditEvent {
+  id        String @id @default(uuid())
+  actorId   String?
+  actor     User? @relation(fields: [actorId], references: [id])
+  ticketId  String?
+  ticket    Ticket? @relation(fields: [ticketId], references: [id])
+  eventType String
+  correlationId String?
+  metadata  Json?
+  hash      String
+  previousHash String?
+  createdAt DateTime @default(now())
+
+  @@index([ticketId, createdAt])
+  @@index([eventType, createdAt])
+}

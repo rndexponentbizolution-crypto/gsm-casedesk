@@ -1,0 +1,19 @@
+{
+  "name": "gsm-casedesk",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=@gsm-casedesk/api & npm run dev --workspace=@gsm-casedesk/web",
+    "build": "npm run build --workspace=@gsm-casedesk/shared && npm run build --workspace=@gsm-casedesk/api && npm run build --workspace=@gsm-casedesk/web",
+    "test": "npm run test --workspace=@gsm-casedesk/api",
+    "lint": "npm run lint --workspaces --if-present",
+    "db:migrate": "npm run db:migrate --workspace=@gsm-casedesk/api",
+    "db:seed": "npm run db:seed --workspace=@gsm-casedesk/api"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
