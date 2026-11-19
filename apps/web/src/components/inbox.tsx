@@ -689,8 +689,8 @@ function Bubble({ message, templateTitle, senderName }: { message: Message; temp
         )}
         <div className="mt-0.5 flex items-center justify-end gap-1 text-[10px] text-slate-500">
           {templateTitle && !fromBot && (
-            <span className="mr-1 flex items-center gap-0.5 rounded bg-slate-900/5 px-1 font-medium" title={`Standard response: ${templateTitle}`}>
-              <BookOpenText size={9} aria-hidden /> {templateTitle}
+            <span className="mr-1 flex min-w-0 max-w-[11rem] items-center gap-0.5 rounded bg-slate-900/5 px-1 font-medium" title={`Standard response: ${templateTitle}`}>
+              <BookOpenText size={9} className="shrink-0" aria-hidden /> <span className="truncate">{templateTitle}</span>
             </span>
           )}
           {message.simulated && <span className="mr-1 rounded bg-slate-900/5 px-1 font-medium uppercase tracking-wide">Sim</span>}
