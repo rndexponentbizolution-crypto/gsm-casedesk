@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Activity,
   AlertTriangle,
   BookOpenText,
   BarChart3,
@@ -42,6 +43,7 @@ const NAV: Array<{ section: string; items: NavItem[] }> = [
     section: "Manage",
     items: [
       { href: "/reports", label: "Reports", icon: BarChart3, supervisorOnly: true },
+      { href: "/operations", label: "Operations", icon: Activity, supervisorOnly: true },
       { href: "/responses", label: "Responses", icon: BookOpenText },
       { href: "/field-agents", label: "Field agents", icon: Users },
       { href: "/staff", label: "Staff", icon: UserCog, supervisorOnly: true },

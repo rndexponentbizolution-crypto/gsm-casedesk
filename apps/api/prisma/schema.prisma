@@ -202,6 +202,8 @@ model Attachment {
   @@index([messageId])
 }
 
+/// One inbound WhatsApp message from Meta's webhook, stored before processing.
+/// status: RECEIVED -> PROCESSING -> PROCESSED | IGNORED (unknown sender) | FAILED (gave up)
 model InboundWebhookEvent {
   id          String @id @default(uuid())
   providerId  String @unique
@@ -210,11 +212,20 @@ model InboundWebhookEvent {
   retryCount  Int @default(0)
   error       String?
   processedAt DateTime?
+  /// Earliest time the worker should (re)try this event.
+  nextAttemptAt DateTime @default(now())
+  /// When a worker claimed it; a stale value means the worker died mid-way.
+  lockedAt    DateTime?
   createdAt   DateTime @default(now())
 
   @@index([status, createdAt])
+  @@index([status, nextAttemptAt])
 }
 
+/// One outbound message waiting for (or done with) delivery to Meta.
+/// status: PENDING -> SENDING -> SENT | FAILED (gave up / permanent error)
+///         | AMBIGUOUS (worker died mid-send; may or may not have been delivered)
+///         | DISMISSED (a supervisor closed it off)
 model OutboundMessageOutbox {
   id          String @id @default(uuid())
   messageId   String @unique

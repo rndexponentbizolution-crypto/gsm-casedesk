@@ -1,8 +1,15 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { AuditService } from './audit.service';
 import type { Actor } from './auth';
 import { PrismaService } from './prisma.service';
+import { ScannerService } from './scanner';
+import { StorageService } from './storage';
+
+// In-memory attachment storage and no virus scanner, so these tests need only PostgreSQL.
+delete process.env.S3_BUCKET;
+delete process.env.CLAMAV_HOST;
 
 // These tests run against a real PostgreSQL database and wipe ticket data
 // between tests. Refuse to run against anything that is not a local/CI host.
@@ -60,7 +67,13 @@ describe('AppController', () => {
   beforeAll(async () => {
     module = await Test.createTestingModule({
       controllers: [AppController],
-      providers: [AppService, PrismaService],
+      providers: [
+        AppService,
+        AuditService,
+        PrismaService,
+        ScannerService,
+        StorageService,
+      ],
     }).compile();
     await module.init();
     api = module.get(AppController);

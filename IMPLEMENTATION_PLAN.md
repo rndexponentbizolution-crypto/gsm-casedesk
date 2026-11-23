@@ -6,7 +6,8 @@
 - [x] Messaging: simulator and persistent-database-ready outbox/schema
 - [x] Real-time inbox: responsive three-column UI and live API refresh
 - [x] Supervision: scoped dashboard metrics, report data and authorised CSV export
-- [ ] Reliability and security: basic tests and Compose exist; PostgreSQL/Keycloak/live WhatsApp require infrastructure
+- [x] Reliability and security: Keycloak sign-in with MFA-ready production realm, signed Meta webhook, outbox with retries, Operations view, S3 attachments with ClamAV scanning, rate limiting, startup config checks, verifiable audit chain
+- [ ] Go-live: hosted infrastructure, Meta business setup and MTN approval (see docs/PRODUCTION.md)
 
 ## Architecture
 - `apps/web`: Next.js TypeScript dashboard

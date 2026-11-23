@@ -9,7 +9,10 @@ import {
   CheckCheck,
   CheckCircle2,
   Clock,
+  Download,
+  FileText,
   ImageIcon,
+  Paperclip,
   Inbox as InboxIcon,
   MapPin,
   MessageSquarePlus,
@@ -27,14 +30,17 @@ import {
 import Link from "next/link";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
+  downloadAttachment,
   useChangeStatus,
   useDashboard,
   useQueryTypes,
   useReassign,
   useReply,
   useResponses,
+  useSendMedia,
   useTickets,
   useUpdateCase,
+  type Attachment,
   type Message,
   type StandardResponse,
   type Ticket,
@@ -46,6 +52,7 @@ import {
   cn,
   dayLabel,
   describeAudit,
+  fileSize,
   fillResponse,
   formatDuration,
   isOpen,
@@ -150,8 +157,21 @@ export function InboxPage({ view }: { view: InboxView }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- matchesFilter is pure
   }, [scoped, filter, typeFilter, query]);
 
+  // A link such as /tickets/all?ticket=<id> (e.g. from Operations) opens that ticket
+  // once the list has loaded, whatever the current filter.
+  const requested = useRef<string | null>(null);
+  useEffect(() => {
+    requested.current = new URLSearchParams(window.location.search).get("ticket");
+    if (requested.current) setFilter("all");
+  }, []);
+
   // On wide screens, keep a ticket open; on narrow screens the list is the starting point.
   useEffect(() => {
+    if (requested.current && scoped.some((ticket) => ticket.id === requested.current)) {
+      setSelectedId(requested.current);
+      requested.current = null;
+      return;
+    }
     if (selectedId && scoped.some((ticket) => ticket.id === selectedId)) return;
     const wide = window.matchMedia("(min-width: 1024px)").matches;
     setSelectedId(wide ? filtered[0]?.id ?? null : null);
@@ -405,7 +425,20 @@ function TicketRow({ ticket, active, onSelect, now, showAssignee }: { ticket: Ti
 
 type TimelineItem = { kind: "message"; at: string; message: Message } | { kind: "event"; at: string; id: string; text: string };
 
-const TIMELINE_EVENTS = new Set(["TICKET_ASSIGNED", "TICKET_REASSIGNED", "TICKET_STATUS_CHANGED", "TICKET_RESOLVED", "TICKET_ESCALATED", "PIN_RESET_ROUTED", "BOT_REDIRECTED_TO_EMAIL"]);
+const TIMELINE_EVENTS = new Set([
+  "TICKET_ASSIGNED",
+  "TICKET_REASSIGNED",
+  "TICKET_STATUS_CHANGED",
+  "TICKET_RESOLVED",
+  "TICKET_ESCALATED",
+  "PIN_RESET_ROUTED",
+  "BOT_REDIRECTED_TO_EMAIL",
+  "MESSAGE_FAILED",
+  "OUTBOUND_RETRIED",
+]);
+
+/** File types staff can send on WhatsApp (mirrors the API's list). */
+const SENDABLE_TYPES = ".jpg,.jpeg,.png,.pdf,.doc,.docx,.xls,.xlsx,.txt,.mp3,.ogg,.mp4";
 
 function Conversation({
   ticket,
@@ -431,10 +464,12 @@ function Conversation({
   const { identity, isSupervisor } = useIdentity();
   const names = useNames();
   const reply = useReply(ticket.id);
+  const sendMedia = useSendMedia(ticket.id);
   const changeStatus = useChangeStatus(ticket.id);
   const [picker, setPicker] = useState<{ query: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const window24 = serviceWindow(ticket, now);
   const canAct = isSupervisor || ticket.assignedUserId === identity.id;
   const closed = !isOpen(ticket);
@@ -477,6 +512,14 @@ function Conversation({
     const sent = draft;
     setDraft({ text: "" }); // clear immediately; the pending bubble shows until the API confirms
     reply.mutate({ text: body, templateId: draft.templateId }, { onError: () => setDraft(sent) });
+  };
+
+  /** Sends a file; any typed text goes with it as the caption. */
+  const attach = (file: File | undefined) => {
+    if (!file || sendMedia.isPending) return;
+    const sent = draft;
+    setDraft({ text: "" });
+    sendMedia.mutate({ file, caption: draft.text.trim() || undefined }, { onError: () => setDraft(sent) });
   };
 
   const pick = (response: StandardResponse) => {
@@ -540,6 +583,19 @@ function Conversation({
           {reply.isPending && reply.variables && (
             <Bubble message={{ id: "pending", direction: "OUTBOUND", body: reply.variables.text, state: "PENDING", simulated: false, createdAt: new Date(now || 0).toISOString() }} />
           )}
+          {sendMedia.isPending && sendMedia.variables && (
+            <Bubble
+              message={{
+                id: "pending-media",
+                direction: "OUTBOUND",
+                body: sendMedia.variables.caption ?? "",
+                state: "PENDING",
+                simulated: false,
+                createdAt: new Date(now || 0).toISOString(),
+                attachments: [{ id: "", name: sendMedia.variables.file.name, mimeType: sendMedia.variables.file.type, size: sendMedia.variables.file.size, scanStatus: "PENDING", available: false }],
+              }}
+            />
+          )}
         </div>
       </div>
 
@@ -599,6 +655,25 @@ function Conversation({
               >
                 <BookOpenText size={18} />
               </button>
+              <button
+                onClick={() => fileRef.current?.click()}
+                disabled={sendMedia.isPending}
+                className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40"
+                aria-label="Attach a file"
+                title="Attach a file (typed text is sent as its caption)"
+              >
+                <Paperclip size={18} />
+              </button>
+              <input
+                ref={fileRef}
+                type="file"
+                accept={SENDABLE_TYPES}
+                className="hidden"
+                onChange={(event) => {
+                  attach(event.target.files?.[0]);
+                  event.target.value = "";
+                }}
+              />
               <textarea
                 ref={textRef}
                 value={draft.text}
@@ -633,9 +708,9 @@ function Conversation({
             <p className="mt-1.5 hidden text-[11px] text-slate-400 sm:block">Enter to send · Shift + Enter for a new line · / for standard responses</p>
           </>
         )}
-        {(reply.error || changeStatus.error) && (
+        {(reply.error || sendMedia.error || changeStatus.error) && (
           <div className="mt-2">
-            <ErrorNotice error={reply.error ?? changeStatus.error} />
+            <ErrorNotice error={reply.error ?? sendMedia.error ?? changeStatus.error} />
           </div>
         )}
       </footer>
@@ -674,12 +749,23 @@ function Bubble({ message, templateTitle, senderName }: { message: Message; temp
         ) : outbound && senderName ? (
           <p className="mb-0.5 text-[10px] font-semibold text-amber-800">{senderName}</p>
         ) : null}
-        {message.mediaType && (
-          <div className="mb-1.5 flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-4 text-xs text-slate-500">
-            <ImageIcon size={18} aria-hidden /> {message.mediaType === "image" ? "Photo" : message.mediaType}
+        {message.attachments?.length ? (
+          <div className="mb-1.5 space-y-1">
+            {message.attachments.map((file) => (
+              <AttachmentChip key={file.id || file.name} file={file} />
+            ))}
           </div>
+        ) : (
+          message.mediaType && (
+            <div className="mb-1.5 flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-4 text-xs text-slate-500">
+              <ImageIcon size={18} aria-hidden /> {message.mediaType === "image" ? "Photo" : message.mediaType}
+            </div>
+          )
         )}
-        <p className="whitespace-pre-wrap break-words text-slate-900">{message.body}</p>
+        {/* Attachment-only messages carry a placeholder body; the chip says it all. */}
+        {!(message.attachments?.length && /^\[\w+ ATTACHMENT\]$/.test(message.body)) && message.body && (
+          <p className="whitespace-pre-wrap break-words text-slate-900">{message.body}</p>
+        )}
         {options.length > 0 && (
           <ul className="mt-2 space-y-1 border-t border-violet-200/70 pt-2" aria-label="Menu options sent">
             {options.map((option, index) => (
@@ -704,11 +790,55 @@ function Bubble({ message, templateTitle, senderName }: { message: Message; temp
   );
 }
 
+function AttachmentChip({ file }: { file: Attachment }) {
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const Icon = file.mimeType.startsWith("image/") ? ImageIcon : FileText;
+  const blocked = file.scanStatus === "INFECTED" ? "Blocked by virus scan" : file.scanStatus === "SCAN_FAILED" ? "Could not be scanned" : null;
+  const download = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await downloadAttachment(file);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div>
+      <button
+        onClick={download}
+        disabled={!file.available || busy}
+        className="flex w-full min-w-[12rem] items-center gap-2 rounded-lg bg-slate-900/5 px-2.5 py-2 text-left text-xs text-slate-700 enabled:hover:bg-slate-900/10 disabled:cursor-default"
+        title={file.available ? `Download ${file.name}` : (blocked ?? "Not available yet")}
+      >
+        <Icon size={18} className="shrink-0 text-slate-500" aria-hidden />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate font-medium">{file.name}</span>
+          <span className={cn("block text-[10px]", blocked ? "text-red-600" : "text-slate-500")}>
+            {blocked ?? `${fileSize(file.size)}${file.scanStatus === "NOT_SCANNED" ? " · not virus-scanned" : ""}`}
+          </span>
+        </span>
+        {file.available && <Download size={14} className="shrink-0 text-slate-500" aria-hidden />}
+      </button>
+      {error && <p className="mt-0.5 text-[10px] text-red-600">{error}</p>}
+    </div>
+  );
+}
+
 function DeliveryState({ state }: { state: string }) {
   if (state === "FAILED")
     return (
       <span className="flex items-center gap-0.5 text-red-600">
         <AlertTriangle size={12} aria-hidden /> Failed
+      </span>
+    );
+  if (state === "AMBIGUOUS")
+    return (
+      <span className="flex items-center gap-0.5 text-amber-700" title="Sending was interrupted; WhatsApp may or may not have delivered it. A supervisor can retry it from Operations.">
+        <AlertTriangle size={12} aria-hidden /> Unconfirmed
       </span>
     );
   if (state === "PENDING") return <Clock size={12} aria-label="Pending" />;

@@ -40,6 +40,13 @@ const PROTECTED: Array<['get' | 'post' | 'patch', string]> = [
   ['get', '/api/reports'],
   ['get', '/api/reports.csv'],
   ['get', '/api/reports/daily-log.csv'],
+  ['post', '/api/tickets/t1/media'],
+  ['get', '/api/attachments/a1'],
+  ['get', '/api/operations'],
+  ['post', '/api/operations/outbound/o1/retry'],
+  ['post', '/api/operations/outbound/o1/dismiss'],
+  ['post', '/api/operations/inbound/i1/retry'],
+  ['get', '/api/audit/verify'],
 ];
 
 describe('API authentication (HTTP)', () => {
@@ -49,6 +56,7 @@ describe('API authentication (HTTP)', () => {
   beforeAll(async () => {
     process.env.AUTH_MODE = 'demo';
     process.env.NODE_ENV = 'test';
+    delete process.env.S3_BUCKET; // in-memory storage; no MinIO needed
     const module = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(PrismaService)
       .useValue(fakePrisma)

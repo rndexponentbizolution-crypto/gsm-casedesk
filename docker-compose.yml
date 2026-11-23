@@ -41,6 +41,14 @@ services:
     volumes:
       - minio_data:/data
 
+  # Optional virus scanning: docker compose --profile scan up -d clamav
+  # (large image; loads its signature database for a minute or two on first start).
+  clamav:
+    image: clamav/clamav:1.4
+    profiles: ["scan"]
+    ports:
+      - "3310:3310"
+
   keycloak:
     image: quay.io/keycloak/keycloak:26.1
     command: start-dev --import-realm
@@ -66,6 +74,10 @@ services:
       # to browsers at localhost.
       KEYCLOAK_URL: http://keycloak:8080
       KEYCLOAK_ISSUER: http://localhost:8080/realms/gsm-casedesk
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: casedesk-attachments
+      S3_ACCESS_KEY: casedesk
+      S3_SECRET_KEY: change-me
     ports:
       - "3001:3001"
     depends_on:

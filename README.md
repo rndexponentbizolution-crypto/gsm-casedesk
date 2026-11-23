@@ -36,4 +36,7 @@ npm run db:seed   # once, from your machine, using the root .env
 Sign-in uses Keycloak by default. To work without Keycloak, set `AUTH_MODE=demo` and `NEXT_PUBLIC_AUTH_MODE=demo` (development only). See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#sign-in-keycloak).
 
 ## WhatsApp
-The system will run a persistent database-backed simulation until Meta credentials are supplied. Live delivery requires Meta Cloud API approval and is never enabled by default.
+CaseDesk runs a database-backed simulation by default (`SIMULATION_ENABLED=true`). Live delivery through Meta's WhatsApp Cloud API is built in and switches on with `SIMULATION_ENABLED=false` plus the Meta credentials; it is never enabled by default.
+
+## Going to production
+[docs/PRODUCTION.md](docs/PRODUCTION.md) is the go-live runbook: infrastructure, Keycloak, Meta setup, monitoring, and the approvals needed first.

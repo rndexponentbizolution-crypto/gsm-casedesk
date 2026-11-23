@@ -1,6 +1,6 @@
 "use client";
 
-import { Bot, Camera, IdCard, SendHorizontal, Smartphone, X } from "lucide-react";
+import { Bot, Camera, IdCard, Paperclip, SendHorizontal, Smartphone, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useFieldAgents, useSimulateInbound, useTickets, type InboundInput, type MenuOption } from "@/lib/api";
 import { cn, shortTime } from "@/lib/format";
@@ -41,6 +41,7 @@ function AgentPhone({ initialPhone, onClose }: { initialPhone: string; onClose: 
   const { isSupervisor } = useIdentity();
   const [phone, setPhone] = useState(initialPhone);
   const [text, setText] = useState("");
+  const fileRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const selectedPhone = phone || agents.data?.[0]?.phone || "";
@@ -130,7 +131,13 @@ function AgentPhone({ initialPhone, onClose }: { initialPhone: string; onClose: 
                       <Bot size={10} aria-hidden /> GSM Bot
                     </p>
                   )}
-                  {message.mediaType && <p className="mb-1 flex items-center gap-1 text-[11px] text-slate-500"><Camera size={12} aria-hidden /> Photo</p>}
+                  {message.attachments?.length
+                    ? message.attachments.map((file) => (
+                        <p key={file.id} className="mb-1 flex items-center gap-1 text-[11px] text-slate-500">
+                          <Paperclip size={12} aria-hidden /> <span className="truncate">{file.name}</span>
+                        </p>
+                      ))
+                    : message.mediaType && <p className="mb-1 flex items-center gap-1 text-[11px] text-slate-500"><Camera size={12} aria-hidden /> Photo</p>}
                   <p className="whitespace-pre-wrap break-words">{message.body}</p>
                   {(message.interactive?.options?.length ?? 0) > 0 && <p className="mt-1 border-t border-slate-100 pt-1 text-center text-[11px] font-medium text-sky-700">☰ {message.interactive?.button ?? "Select"}</p>}
                   <p className="text-right text-[10px] text-slate-400">{shortTime(message.createdAt)}</p>
@@ -203,6 +210,28 @@ function AgentPhone({ initialPhone, onClose }: { initialPhone: string; onClose: 
           )}
           {simulate.error && <ErrorNotice error={simulate.error} />}
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => fileRef.current?.click()}
+              disabled={simulate.isPending || !selectedPhone}
+              className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-slate-500 hover:bg-slate-200 disabled:opacity-40"
+              aria-label="Attach a real file"
+              title="Attach a real file (typed text becomes its caption)"
+            >
+              <Paperclip size={17} />
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = "";
+                if (!file) return;
+                const caption = text.trim();
+                setText("");
+                send({ file, text: caption || undefined });
+              }}
+            />
             <input
               value={text}
               onChange={(event) => setText(event.target.value)}

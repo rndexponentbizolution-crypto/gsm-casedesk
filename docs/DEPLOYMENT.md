@@ -39,7 +39,13 @@ To add a staff member: create them in Keycloak, then create a CaseDesk `User` wh
 `AUTH_MODE=demo` (with `NEXT_PUBLIC_AUTH_MODE=demo`) restores the persona picker for local work without Keycloak. The API then trusts an `x-demo-user` header, takes the role from the database, and refuses to start when `NODE_ENV=production`.
 
 ## Meta WhatsApp
-Supply only approved Meta secrets as environment variables. Configure the webhook endpoint on an HTTPS reverse proxy, validate the raw-body `X-Hub-Signature-256`, and keep `SIMULATION_ENABLED=false` in production.
+`SIMULATION_ENABLED=true` (the default) keeps all messages inside CaseDesk and enables the simulator, which can also send real files. `SIMULATION_ENABLED=false` switches to live WhatsApp: Meta's signed webhook at `/webhooks/whatsapp` is the only way in (the raw-body `X-Hub-Signature-256` is verified against `META_APP_SECRET`), and outbound messages are delivered through the outbox. Setup, behaviour and limits are in [PRODUCTION.md](PRODUCTION.md#6-meta-whatsapp-cloud-api-you).
+
+## Attachments and virus scanning
+Attachments are stored in S3-compatible storage (`S3_*`; MinIO in Compose). In simulation, leaving `S3_BUCKET` empty keeps them in memory instead. To scan them locally, run `docker compose --profile scan up -d clamav` and set `CLAMAV_HOST=localhost`; infected files are never stored or served.
+
+## Production
+See [PRODUCTION.md](PRODUCTION.md) for the go-live runbook.
 
 ## Operations
 - Back up PostgreSQL before upgrades.

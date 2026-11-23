@@ -28,6 +28,17 @@ export type Message = {
   interactive?: { type?: "list"; button?: string; options?: MenuOption[]; replyId?: string } | null;
   mediaType?: string | null;
   createdAt: string;
+  attachments?: Attachment[];
+};
+
+export type Attachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  /** CLEAN, NOT_SCANNED, INFECTED or SCAN_FAILED */
+  scanStatus: string;
+  available: boolean;
 };
 
 export type MenuOption = { id: string; title: string };
@@ -156,6 +167,33 @@ export type FieldAgent = {
 
 export type Health = { status: string; database?: "ok" | "error"; mode: string; timestamp: string };
 
+export type OutboundIssue = {
+  id: string;
+  /** FAILED, AMBIGUOUS (delivery unknown) or PENDING (retrying) */
+  status: string;
+  attempts: number;
+  error: string | null;
+  nextAttemptAt: string | null;
+  updatedAt: string;
+  to: string | null;
+  preview: string;
+  ticketId: string | null;
+  reference: string | null;
+};
+
+export type InboundIssue = {
+  id: string;
+  status: string;
+  attempts: number;
+  error: string | null;
+  from: string | null;
+  type: string | null;
+  preview: string;
+  receivedAt: string;
+};
+
+export type Operations = { mode: "simulation" | "live"; outbound: OutboundIssue[]; inbound: InboundIssue[] };
+
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
@@ -170,7 +208,8 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
       ...init,
       headers: {
         ...auth,
-        ...(init.body ? { "Content-Type": "application/json" } : {}),
+        // FormData sets its own multipart boundary; only JSON strings need this.
+        ...(typeof init.body === "string" ? { "Content-Type": "application/json" } : {}),
         ...init.headers,
       },
     });
@@ -248,6 +287,16 @@ export function useQueryTypes() {
   });
 }
 
+export function useOperations() {
+  const { identity } = useIdentity();
+  return useQuery({
+    queryKey: ["operations", identity.id],
+    queryFn: () => apiFetch<Operations>("/api/operations"),
+    enabled: identity.role !== "BACK_OFFICE",
+    refetchInterval: 15_000,
+  });
+}
+
 export function useHealth() {
   return useQuery({
     queryKey: ["health"],
@@ -286,7 +335,7 @@ function useAfterWrite() {
         ),
       );
     }
-    for (const key of ["tickets", "dashboard", "reports"]) void client.invalidateQueries({ queryKey: [key] });
+    for (const key of ["tickets", "dashboard", "reports", "operations"]) void client.invalidateQueries({ queryKey: [key] });
   };
 }
 
@@ -330,27 +379,79 @@ export function useUpdateCase(ticketId: string) {
   });
 }
 
-export type InboundInput = { phone: string; text?: string; replyId?: string; mediaType?: string };
-
-export function useSimulateInbound() {
+/** Send a file (with an optional caption) to the field agent on WhatsApp. */
+export function useSendMedia(ticketId: string) {
   const afterWrite = useAfterWrite();
   return useMutation({
-    mutationFn: (input: InboundInput) =>
-      apiFetch<{ ticketId: string | null; reference: string | null; duplicate: boolean; botState?: BotState }>("/api/simulator/inbound", {
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
+    mutationFn: (input: { file: File; caption?: string }) => {
+      const form = new FormData();
+      form.append("file", input.file);
+      if (input.caption) form.append("caption", input.caption);
+      return apiFetch<Ticket>(`/api/tickets/${ticketId}/media`, { method: "POST", body: form });
+    },
+    onSuccess: (ticket) => afterWrite(ticket),
+  });
+}
+
+/** Supervisor actions on failed or stuck messages. */
+export function useOperationAction() {
+  const afterWrite = useAfterWrite();
+  return useMutation({
+    mutationFn: (input: { kind: "outbound" | "inbound"; id: string; action: "retry" | "dismiss" }) =>
+      apiFetch<{ id: string; status: string }>(`/api/operations/${input.kind}/${input.id}/${input.action}`, { method: "POST" }),
     onSuccess: () => afterWrite(),
   });
 }
 
-function saveCsv(csv: string, filename: string) {
-  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+export type InboundInput = { phone: string; text?: string; replyId?: string; mediaType?: string; file?: File };
+
+export function useSimulateInbound() {
+  const afterWrite = useAfterWrite();
+  return useMutation({
+    mutationFn: ({ file, ...input }: InboundInput) => {
+      let body: string | FormData = JSON.stringify(input);
+      if (file) {
+        body = new FormData();
+        for (const [key, value] of Object.entries(input)) if (value) body.append(key, value);
+        body.append("file", file);
+      }
+      return apiFetch<{ ticketId: string | null; reference: string | null; duplicate: boolean; botState?: BotState }>("/api/simulator/inbound", {
+        method: "POST",
+        body,
+      });
+    },
+    onSuccess: () => afterWrite(),
+  });
+}
+
+/** Downloads an attachment with the signed-in user's credentials. */
+export async function downloadAttachment(attachment: Pick<Attachment, "id" | "name">) {
+  const response = await fetch(`${API_URL}/api/attachments/${attachment.id}`, { headers: await authHeaders() });
+  if (response.status === 401) handleUnauthorized();
+  if (!response.ok) {
+    let message = `Download failed (${response.status})`;
+    try {
+      const body = await response.json();
+      if (typeof body?.message === "string") message = body.message;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(message, response.status);
+  }
+  saveBlob(await response.blob(), attachment.name);
+}
+
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+function saveCsv(csv: string, filename: string) {
+  saveBlob(new Blob([csv], { type: "text/csv;charset=utf-8" }), filename);
 }
 
 export async function downloadReportCsv() {

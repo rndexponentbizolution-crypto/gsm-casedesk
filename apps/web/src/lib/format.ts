@@ -173,6 +173,17 @@ const AUDIT_LABEL: Record<string, string> = {
   BOT_REDIRECTED_TO_EMAIL: "Bot redirected to email",
   TICKET_ESCALATED: "Escalated",
   CASE_UPDATED: "Case details updated",
+  MESSAGE_QUEUED: "Reply queued for WhatsApp",
+  MESSAGE_FAILED: "WhatsApp delivery failed",
+  MESSAGE_AMBIGUOUS: "WhatsApp delivery unconfirmed",
+  MEDIA_SENT: "File sent",
+  MEDIA_QUEUED: "File queued for WhatsApp",
+  ATTACHMENT_DOWNLOADED: "Attachment downloaded",
+  ATTACHMENT_REJECTED: "Attachment rejected by virus scan",
+  ACCESS_DENIED: "Access refused",
+  OUTBOUND_RETRIED: "Failed message retried",
+  OUTBOUND_DISMISSED: "Failed message dismissed",
+  REPORT_EXPORTED: "Report exported",
 };
 
 export function describeAudit(type: string, metadata: Record<string, unknown>, names: Map<string, string>) {
@@ -184,5 +195,14 @@ export function describeAudit(type: string, metadata: Record<string, unknown>, n
   if (type === "BOT_QUERY_SELECTED" && typeof metadata.queryType === "string") return `Bot: ${metadata.queryType === "PIN_RESET" ? "PIN reset" : metadata.queryType} selected`;
   if (type === "TICKET_STATUS_CHANGED" && typeof metadata.to === "string")
     return `${label} to ${STATUS_LABEL[metadata.to as TicketStatus] ?? metadata.to}`;
+  if (type === "MESSAGE_FAILED" && typeof metadata.error === "string") return `${label}: ${metadata.error}`;
+  if ((type === "ATTACHMENT_DOWNLOADED" || type === "MEDIA_SENT" || type === "MEDIA_QUEUED") && typeof metadata.name === "string")
+    return `${label}: ${metadata.name}`;
   return label;
+}
+
+export function fileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

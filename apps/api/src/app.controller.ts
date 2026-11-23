@@ -8,9 +8,22 @@ import {
   Patch,
   Post,
   Query,
+  StreamableFile,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
-import { AppService } from './app.service';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { AppService, MAX_MEDIA_BYTES } from './app.service';
 import { type Actor, CurrentActor, Public } from './auth';
+import { messagingMode } from './config';
+
+const upload = FileInterceptor('file', {
+  limits: { fileSize: MAX_MEDIA_BYTES, files: 1 },
+});
+
+/** RFC 6266 filename, safe for any characters. */
+const disposition = (name: string) =>
+  `attachment; filename="${name.replace(/[^\w.\- ]+/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 
 @Controller()
 export class AppController {
@@ -23,10 +36,7 @@ export class AppController {
     return {
       status: database === 'ok' ? 'ok' : 'degraded',
       database,
-      mode:
-        process.env.SIMULATION_ENABLED === 'false'
-          ? 'live-ready'
-          : 'simulation',
+      mode: messagingMode(),
       timestamp: new Date().toISOString(),
     };
   }
@@ -62,6 +72,29 @@ export class AppController {
     @Body() body: { text?: string; templateId?: string },
   ) {
     return this.app.reply(actor.role, actor.id, id, body.text, body.templateId);
+  }
+
+  /** Send a file (multipart field "file", optional "caption") to the field agent. */
+  @Post('api/tickets/:id/media')
+  @UseInterceptors(upload)
+  sendMedia(
+    @CurrentActor() actor: Actor,
+    @Param('id') id: string,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body() body: { caption?: string },
+  ) {
+    return this.app.sendMedia(actor.role, actor.id, id, file, body?.caption);
+  }
+
+  /** Download an attachment. Always served as a download, never rendered inline. */
+  @Get('api/attachments/:id')
+  async attachment(@CurrentActor() actor: Actor, @Param('id') id: string) {
+    const file = await this.app.attachment(actor.role, actor.id, id);
+    return new StreamableFile(file.body, {
+      type: file.mimeType,
+      disposition: disposition(file.name),
+      length: file.body.length,
+    });
   }
 
   @Patch('api/tickets/:id/case')
@@ -101,27 +134,36 @@ export class AppController {
     return this.app.changeStatus(actor.role, actor.id, id, body.status);
   }
 
+  /**
+   * Simulator: pretend a field agent sent a message. JSON, or multipart with a
+   * "file" to simulate an attachment. Off whenever live WhatsApp is enabled.
+   */
   @Post('api/simulator/inbound')
+  @UseInterceptors(upload)
   simulateInbound(
     @Body()
     body: {
       phone: string;
       text?: string;
       mediaType?: string;
-      duplicate?: boolean;
+      duplicate?: boolean | string;
       providerId?: string;
       replyId?: string;
     },
+    @UploadedFile() file?: Express.Multer.File,
   ) {
-    if (
-      process.env.NODE_ENV === 'production' &&
-      process.env.SIMULATION_ENABLED !== 'true'
-    ) {
+    if (messagingMode() === 'live')
       throw new BadRequestException('Simulator unavailable');
-    }
-    if (!body.phone || (!body.text && !body.mediaType && !body.replyId))
+    if (!body.phone || (!body.text && !body.mediaType && !body.replyId && !file))
       throw new BadRequestException('phone and message content are required');
-    return this.app.simulateInbound(body);
+    return this.app.simulateInbound(
+      {
+        ...body,
+        // Multipart fields arrive as strings.
+        duplicate: body.duplicate === true || body.duplicate === 'true',
+      },
+      file,
+    );
   }
 
   @Get('api/field-agents')
