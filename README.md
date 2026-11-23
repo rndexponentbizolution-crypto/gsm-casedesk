@@ -9,18 +9,31 @@ GSM CaseDesk is a secure, human-operated WhatsApp case management platform for b
 - Docker Desktop or Docker Engine (recommended)
 
 ## Local development
+Run the services in Docker and the apps on your machine:
 ```powershell
 npm install
 cp .env.example .env
+docker compose up -d postgres redis minio keycloak
 npm run db:migrate
 npm run db:seed
 npm run dev
+```
+
+The API, Prisma, the tests and the web app all read the root `.env`. PostgreSQL is published on host port **5433** (set `POSTGRES_HOST_PORT` to change it), so a locally installed PostgreSQL on 5432 doesn't get in the way.
+
+Or run everything in Docker (the API applies migrations on start):
+```powershell
+docker compose up -d --build
+npm run db:seed   # once, from your machine, using the root .env
 ```
 
 - Web: http://localhost:3000
 - API: http://localhost:3001
 - Swagger: http://localhost:3001/docs
 - MinIO: http://localhost:9001
+- Keycloak: http://localhost:8080 (sign in as `chanda`, `martha` or `peter`, password `casedesk-dev`)
+
+Sign-in uses Keycloak by default. To work without Keycloak, set `AUTH_MODE=demo` and `NEXT_PUBLIC_AUTH_MODE=demo` (development only). See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#sign-in-keycloak).
 
 ## WhatsApp
 The system will run a persistent database-backed simulation until Meta credentials are supplied. Live delivery requires Meta Cloud API approval and is never enabled by default.

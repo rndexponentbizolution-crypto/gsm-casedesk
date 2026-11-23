@@ -14,6 +14,7 @@ import {
   Users,
   X,
   type LucideIcon,
+  LogOut,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -180,7 +181,7 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
 }
 
 function IdentityMenu() {
-  const { identity, setIdentity } = useIdentity();
+  const { identity, setIdentity, signOut } = useIdentity();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -213,28 +214,41 @@ function IdentityMenu() {
       </button>
       {open && (
         <div role="menu" className="absolute right-0 top-full mt-2 w-64 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
-          <p className="px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-slate-400">Demo: view the desk as…</p>
-          {IDENTITIES.map((item) => (
+          {setIdentity ? (
+            <>
+              <p className="px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-slate-400">Demo: view the desk as…</p>
+              {IDENTITIES.map((item) => (
+                <button
+                  key={item.id}
+                  role="menuitemradio"
+                  aria-checked={item.id === identity.id}
+                  onClick={() => {
+                    setIdentity(item.id);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    "flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left hover:bg-slate-50",
+                    item.id === identity.id && "bg-amber-50",
+                  )}
+                >
+                  <Avatar name={item.name} size={28} />
+                  <span className="flex-1">
+                    <span className="block text-sm text-slate-900">{item.name}</span>
+                    <span className="block text-[11px] text-slate-500">{item.title}</span>
+                  </span>
+                </button>
+              ))}
+            </>
+          ) : (
             <button
-              key={item.id}
-              role="menuitemradio"
-              aria-checked={item.id === identity.id}
-              onClick={() => {
-                setIdentity(item.id);
-                setOpen(false);
-              }}
-              className={cn(
-                "flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left hover:bg-slate-50",
-                item.id === identity.id && "bg-amber-50",
-              )}
+              role="menuitem"
+              onClick={() => signOut?.()}
+              className="flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
             >
-              <Avatar name={item.name} size={28} />
-              <span className="flex-1">
-                <span className="block text-sm text-slate-900">{item.name}</span>
-                <span className="block text-[11px] text-slate-500">{item.title}</span>
-              </span>
+              <LogOut size={16} className="text-slate-400" aria-hidden />
+              Sign out
             </button>
-          ))}
+          )}
         </div>
       )}
     </div>

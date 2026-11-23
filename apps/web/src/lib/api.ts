@@ -1,7 +1,8 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useIdentity, type Identity } from "./identity";
+import { useIdentity } from "./identity";
+import { authHeaders, handleUnauthorized } from "./session";
 
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001").replace(/\/$/, "");
 
@@ -161,17 +162,14 @@ export class ApiError extends Error {
   }
 }
 
-function identityHeaders(identity: Identity): Record<string, string> {
-  return { "x-demo-role": identity.role, "x-demo-user": identity.id };
-}
-
-export async function apiFetch<T>(path: string, identity: Identity | null, init: RequestInit = {}): Promise<T> {
+export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const auth = await authHeaders();
   let response: Response;
   try {
     response = await fetch(`${API_URL}${path}`, {
       ...init,
       headers: {
-        ...(identity ? identityHeaders(identity) : {}),
+        ...auth,
         ...(init.body ? { "Content-Type": "application/json" } : {}),
         ...init.headers,
       },
@@ -179,6 +177,7 @@ export async function apiFetch<T>(path: string, identity: Identity | null, init:
   } catch {
     throw new ApiError("Cannot reach the CaseDesk API. It may be waking up — try again in a moment.", 0);
   }
+  if (response.status === 401) handleUnauthorized();
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
     try {
@@ -200,7 +199,7 @@ export function useTickets() {
   const { identity } = useIdentity();
   return useQuery({
     queryKey: ["tickets", identity.id],
-    queryFn: () => apiFetch<Ticket[]>("/api/tickets", identity),
+    queryFn: () => apiFetch<Ticket[]>("/api/tickets"),
     // PIN resets carry a 5-minute SLA, so keep the queue fresh.
     refetchInterval: 8_000,
   });
@@ -210,7 +209,7 @@ export function useDashboard() {
   const { identity } = useIdentity();
   return useQuery({
     queryKey: ["dashboard", identity.id],
-    queryFn: () => apiFetch<Dashboard>("/api/dashboard", identity),
+    queryFn: () => apiFetch<Dashboard>("/api/dashboard"),
     refetchInterval: 30_000,
   });
 }
@@ -219,7 +218,7 @@ export function useReports() {
   const { identity } = useIdentity();
   return useQuery({
     queryKey: ["reports", identity.id],
-    queryFn: () => apiFetch<Report>("/api/reports", identity),
+    queryFn: () => apiFetch<Report>("/api/reports"),
     enabled: identity.role !== "BACK_OFFICE",
     refetchInterval: 60_000,
   });
@@ -228,7 +227,7 @@ export function useReports() {
 export function useFieldAgents() {
   return useQuery({
     queryKey: ["field-agents"],
-    queryFn: () => apiFetch<FieldAgent[]>("/api/field-agents", null),
+    queryFn: () => apiFetch<FieldAgent[]>("/api/field-agents"),
     staleTime: 60_000,
   });
 }
@@ -236,7 +235,7 @@ export function useFieldAgents() {
 export function useResponses() {
   return useQuery({
     queryKey: ["responses"],
-    queryFn: () => apiFetch<StandardResponse[]>("/api/responses", null),
+    queryFn: () => apiFetch<StandardResponse[]>("/api/responses"),
     staleTime: Infinity,
   });
 }
@@ -244,7 +243,7 @@ export function useResponses() {
 export function useQueryTypes() {
   return useQuery({
     queryKey: ["query-types"],
-    queryFn: () => apiFetch<QueryType[]>("/api/query-types", null),
+    queryFn: () => apiFetch<QueryType[]>("/api/query-types"),
     staleTime: Infinity,
   });
 }
@@ -252,7 +251,7 @@ export function useQueryTypes() {
 export function useHealth() {
   return useQuery({
     queryKey: ["health"],
-    queryFn: () => apiFetch<Health>("/health", null),
+    queryFn: () => apiFetch<Health>("/health"),
     refetchInterval: 60_000,
     retry: 1,
   });
@@ -296,7 +295,7 @@ export function useReply(ticketId: string) {
   const afterWrite = useAfterWrite();
   return useMutation({
     mutationFn: (input: { text: string; templateId?: string }) =>
-      apiFetch<Ticket>(`/api/tickets/${ticketId}/reply`, identity, { method: "POST", body: JSON.stringify(input) }),
+      apiFetch<Ticket>(`/api/tickets/${ticketId}/reply`, { method: "POST", body: JSON.stringify(input) }),
     onSuccess: (ticket) => afterWrite(ticket),
   });
 }
@@ -306,7 +305,7 @@ export function useChangeStatus(ticketId: string) {
   const afterWrite = useAfterWrite();
   return useMutation({
     mutationFn: (status: TicketStatus) =>
-      apiFetch<Ticket>(`/api/tickets/${ticketId}/status`, identity, { method: "POST", body: JSON.stringify({ status }) }),
+      apiFetch<Ticket>(`/api/tickets/${ticketId}/status`, { method: "POST", body: JSON.stringify({ status }) }),
     onSuccess: (ticket) => afterWrite(ticket),
   });
 }
@@ -316,7 +315,7 @@ export function useReassign(ticketId: string) {
   const afterWrite = useAfterWrite();
   return useMutation({
     mutationFn: (userId: string) =>
-      apiFetch<Ticket>(`/api/tickets/${ticketId}/reassign`, identity, { method: "POST", body: JSON.stringify({ userId }) }),
+      apiFetch<Ticket>(`/api/tickets/${ticketId}/reassign`, { method: "POST", body: JSON.stringify({ userId }) }),
     onSuccess: (ticket) => afterWrite(ticket),
   });
 }
@@ -326,7 +325,7 @@ export function useUpdateCase(ticketId: string) {
   const afterWrite = useAfterWrite();
   return useMutation({
     mutationFn: (patch: { queryType?: string; details?: Partial<CaseDetails> }) =>
-      apiFetch<Ticket>(`/api/tickets/${ticketId}/case`, identity, { method: "PATCH", body: JSON.stringify(patch) }),
+      apiFetch<Ticket>(`/api/tickets/${ticketId}/case`, { method: "PATCH", body: JSON.stringify(patch) }),
     onSuccess: (ticket) => afterWrite(ticket),
   });
 }
@@ -337,7 +336,7 @@ export function useSimulateInbound() {
   const afterWrite = useAfterWrite();
   return useMutation({
     mutationFn: (input: InboundInput) =>
-      apiFetch<{ ticketId: string | null; reference: string | null; duplicate: boolean; botState?: BotState }>("/api/simulator/inbound", null, {
+      apiFetch<{ ticketId: string | null; reference: string | null; duplicate: boolean; botState?: BotState }>("/api/simulator/inbound", {
         method: "POST",
         body: JSON.stringify(input),
       }),
@@ -354,11 +353,11 @@ function saveCsv(csv: string, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-export async function downloadReportCsv(identity: Identity) {
-  saveCsv(await apiFetch<string>("/api/reports.csv", identity), `gsm-casedesk-report-${new Date().toISOString().slice(0, 10)}.csv`);
+export async function downloadReportCsv() {
+  saveCsv(await apiFetch<string>("/api/reports.csv"), `gsm-casedesk-report-${new Date().toISOString().slice(0, 10)}.csv`);
 }
 
 /** SOP Step 6 daily log for one day (YYYY-MM-DD). */
-export async function downloadDailyLog(identity: Identity, day: string) {
-  saveCsv(await apiFetch<string>(`/api/reports/daily-log.csv?date=${encodeURIComponent(day)}`, identity), `gsm-daily-log-${day}.csv`);
+export async function downloadDailyLog(day: string) {
+  saveCsv(await apiFetch<string>(`/api/reports/daily-log.csv?date=${encodeURIComponent(day)}`), `gsm-daily-log-${day}.csv`);
 }

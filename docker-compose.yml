@@ -5,8 +5,10 @@ services:
       POSTGRES_DB: casedesk
       POSTGRES_USER: casedesk
       POSTGRES_PASSWORD: casedesk
+    # Host port 5433 by default so a locally installed PostgreSQL on 5432 can't
+    # intercept connections meant for this container. Override with POSTGRES_HOST_PORT.
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -26,7 +28,9 @@ services:
       retries: 10
 
   minio:
-    image: minio/minio:latest
+    # MinIO no longer publishes images to Docker Hub or Quay. Chainguard builds the
+    # same open-source server; its free tier only offers the :latest tag.
+    image: cgr.dev/chainguard/minio:latest
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: casedesk
@@ -49,12 +53,19 @@ services:
       - ./infrastructure/keycloak:/opt/keycloak/data/import
 
   api:
-    build: ./apps/api
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
     environment:
       DATABASE_URL: postgresql://casedesk:casedesk@postgres:5432/casedesk
       REDIS_URL: redis://redis:6379
       NODE_ENV: development
       SIMULATION_ENABLED: "true"
+      AUTH_MODE: keycloak
+      # The API fetches signing keys over the Docker network, but tokens are issued
+      # to browsers at localhost.
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_ISSUER: http://localhost:8080/realms/gsm-casedesk
     ports:
       - "3001:3001"
     depends_on:
@@ -64,11 +75,21 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
+      keycloak:
+        condition: service_started
 
   web:
-    build: ./apps/web
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:3001
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      # Compiled into the browser bundle, so these must be build args, not runtime env.
+      # They are URLs the browser uses, hence localhost rather than service names.
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:3001
+        NEXT_PUBLIC_AUTH_MODE: keycloak
+        NEXT_PUBLIC_KEYCLOAK_URL: http://localhost:8080
+        NEXT_PUBLIC_KEYCLOAK_REALM: gsm-casedesk
+        NEXT_PUBLIC_KEYCLOAK_CLIENT_ID: gsm-casedesk-web
     ports:
       - "3000:3000"
     depends_on:

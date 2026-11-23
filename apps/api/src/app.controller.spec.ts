@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import type { Actor } from './auth';
 import { PrismaService } from './prisma.service';
 
 // These tests run against a real PostgreSQL database and wipe ticket data
@@ -22,7 +23,16 @@ if (!SAFE_HOSTS.includes(dbHost)) {
 
 const JOSEPH = '+260970000001';
 const RUTH = '+260970000002';
-const SUP = ['SUPERVISOR', 'demo-supervisor'] as const;
+const SUP: Actor = {
+  id: 'demo-supervisor',
+  role: 'SUPERVISOR',
+  name: 'Chanda Mwansa',
+};
+const AGENT_1: Actor = {
+  id: 'demo-agent-1',
+  role: 'BACK_OFFICE',
+  name: 'Martha Banda',
+};
 
 describe('AppController', () => {
   let module: TestingModule;
@@ -44,7 +54,8 @@ describe('AppController', () => {
     });
     return routed.ticketId!;
   };
-  const get = async (id: string) => (await service.ticket(...SUP, id))!;
+  const get = async (id: string) =>
+    (await service.ticket(SUP.role, SUP.id, id))!;
 
   beforeAll(async () => {
     module = await Test.createTestingModule({
@@ -159,7 +170,7 @@ describe('AppController', () => {
 
     it('starts a new ticket after the previous one is closed', async () => {
       const first = await openPinReset();
-      await api.reply(...SUP, first, {
+      await api.reply(SUP, first, {
         text: 'done',
         templateId: 'success-pin-reset',
       });
@@ -172,7 +183,7 @@ describe('AppController', () => {
   describe('standard responses', () => {
     it('resolve: successful PIN reset records the outcome and frees the conversation', async () => {
       const id = await openPinReset();
-      const ticket = await api.reply(...SUP, id, {
+      const ticket = await api.reply(SUP, id, {
         text: 'Your PIN reset request has been processed successfully.',
         templateId: 'success-pin-reset',
       });
@@ -185,7 +196,7 @@ describe('AppController', () => {
 
     it('escalate: records subject, attachments, email and a new SLA', async () => {
       const id = await openPinReset();
-      const ticket = await api.reply(...SUP, id, {
+      const ticket = await api.reply(SUP, id, {
         text: 'Above threshold',
         templateId: 'esc-above-threshold',
       });
@@ -203,7 +214,7 @@ describe('AppController', () => {
 
     it('pending: waits on the field agent, and their next message re-opens work', async () => {
       const id = await openPinReset();
-      const pending = await api.reply(...SUP, id, {
+      const pending = await api.reply(SUP, id, {
         text: 'Missing NRC',
         templateId: 'doc-missing-live-nrc',
       });
@@ -219,20 +230,20 @@ describe('AppController', () => {
     it('refuses replies on closed cases and unknown templates', async () => {
       const id = await openPinReset();
       await expect(
-        api.reply(...SUP, id, { text: 'x', templateId: 'nope' }),
+        api.reply(SUP, id, { text: 'x', templateId: 'nope' }),
       ).rejects.toThrow();
-      await api.reply(...SUP, id, {
+      await api.reply(SUP, id, {
         text: 'x',
         templateId: 'call-not-answering',
       });
-      await expect(api.reply(...SUP, id, { text: 'hello' })).rejects.toThrow();
+      await expect(api.reply(SUP, id, { text: 'hello' })).rejects.toThrow();
     });
   });
 
   describe('casework', () => {
     it('saves log fields and checklists', async () => {
       const id = await openPinReset();
-      const ticket = await api.updateCase(...SUP, id, {
+      const ticket = await api.updateCase(SUP, id, {
         details: {
           nrcNumber: '123456/10/1',
           balanceZmw: 1200,
@@ -246,17 +257,17 @@ describe('AppController', () => {
         nrcFront: true,
       });
       await expect(
-        api.updateCase(...SUP, id, { details: { hacked: true } }),
+        api.updateCase(SUP, id, { details: { hacked: true } }),
       ).rejects.toThrow();
     });
 
     it('produces the SOP daily log', async () => {
       const id = await openPinReset();
-      await api.reply(...SUP, id, {
+      await api.reply(SUP, id, {
         text: 'ok',
         templateId: 'success-pin-reset',
       });
-      const csv = await api.dailyLog(...SUP);
+      const csv = await api.dailyLog(SUP);
       const [header, row] = csv.split('\n');
       expect(header).toContain('"Time of Pickup"');
       expect(row).toContain('"+260971234567"');
@@ -292,7 +303,7 @@ describe('AppController', () => {
       const previous = (await get(id)).assignedUserId!;
       const target =
         previous === 'demo-agent-1' ? 'demo-agent-2' : 'demo-agent-1';
-      await api.reassign(...SUP, id, { userId: target });
+      await api.reassign(SUP, id, { userId: target });
       expect(await service.ticket('BACK_OFFICE', previous, id)).toBeNull();
       expect(await service.ticket('BACK_OFFICE', target, id)).not.toBeNull();
     });
@@ -318,7 +329,7 @@ describe('AppController', () => {
 
     it('keeps an unbroken audit hash chain', async () => {
       const id = await openPinReset();
-      await api.reply(...SUP, id, { text: 'Reply' });
+      await api.reply(SUP, id, { text: 'Reply' });
       const events = await prisma.auditEvent.findMany({
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       });
@@ -332,25 +343,19 @@ describe('AppController', () => {
 
     it('allows authorised reports and CSV export', async () => {
       await openPinReset();
-      const report = await api.reports(...SUP);
+      const report = await api.reports(SUP);
       expect(report.ticketsCreated).toBeGreaterThan(0);
       expect(report.byQueryType['PIN reset']).toBe(1);
-      expect(await api.reportCsv(...SUP)).toContain('"metric","value"');
-      await expect(
-        api.reports('BACK_OFFICE', 'demo-agent-1'),
-      ).rejects.toThrow();
-      await expect(
-        api.dailyLog('BACK_OFFICE', 'demo-agent-1'),
-      ).rejects.toThrow();
+      expect(await api.reportCsv(SUP)).toContain('"metric","value"');
+      await expect(api.reports(AGENT_1)).rejects.toThrow();
+      await expect(api.dailyLog(AGENT_1)).rejects.toThrow();
     });
 
     it('enforces invalid status transitions', async () => {
       const id = await openPinReset(RUTH);
+      await expect(api.status(SUP, id, { status: 'CLOSED' })).rejects.toThrow();
       await expect(
-        api.status(...SUP, id, { status: 'CLOSED' }),
-      ).rejects.toThrow();
-      await expect(
-        api.status(...SUP, id, { status: 'IN_PROGRESS' }),
+        api.status(SUP, id, { status: 'IN_PROGRESS' }),
       ).resolves.toBeDefined();
     });
   });

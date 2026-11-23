@@ -4,18 +4,19 @@ import {
   Controller,
   Get,
   Header,
-  Headers,
   Param,
   Patch,
   Post,
   Query,
 } from '@nestjs/common';
 import { AppService } from './app.service';
+import { type Actor, CurrentActor, Public } from './auth';
 
 @Controller()
 export class AppController {
   constructor(private readonly app: AppService) {}
 
+  @Public()
   @Get('health')
   async health() {
     const database = (await this.app.databaseReachable()) ? 'ok' : 'error';
@@ -30,30 +31,25 @@ export class AppController {
     };
   }
 
+  /** The signed-in user, as CaseDesk knows them. */
+  @Get('api/me')
+  me(@CurrentActor() actor: Actor) {
+    return actor;
+  }
+
   @Get('api/dashboard')
-  dashboard(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
-  ) {
-    return this.app.dashboard(role, user);
+  dashboard(@CurrentActor() actor: Actor) {
+    return this.app.dashboard(actor.role, actor.id);
   }
 
   @Get('api/tickets')
-  tickets(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
-    @Query('status') status?: string,
-  ) {
-    return this.app.tickets(role, user, status);
+  tickets(@CurrentActor() actor: Actor, @Query('status') status?: string) {
+    return this.app.tickets(actor.role, actor.id, status);
   }
 
   @Get('api/tickets/:id')
-  async ticket(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
-    @Param('id') id: string,
-  ) {
-    const ticket = await this.app.ticket(role, user, id);
+  async ticket(@CurrentActor() actor: Actor, @Param('id') id: string) {
+    const ticket = await this.app.ticket(actor.role, actor.id, id);
     if (!ticket)
       throw new BadRequestException('Ticket not found or not authorised');
     return ticket;
@@ -61,22 +57,20 @@ export class AppController {
 
   @Post('api/tickets/:id/reply')
   reply(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
+    @CurrentActor() actor: Actor,
     @Param('id') id: string,
     @Body() body: { text?: string; templateId?: string },
   ) {
-    return this.app.reply(role, user, id, body.text, body.templateId);
+    return this.app.reply(actor.role, actor.id, id, body.text, body.templateId);
   }
 
   @Patch('api/tickets/:id/case')
   updateCase(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
+    @CurrentActor() actor: Actor,
     @Param('id') id: string,
     @Body() body: { queryType?: string; details?: Record<string, unknown> },
   ) {
-    return this.app.updateCase(role, user, id, body ?? {});
+    return this.app.updateCase(actor.role, actor.id, id, body ?? {});
   }
 
   @Get('api/query-types')
@@ -91,22 +85,20 @@ export class AppController {
 
   @Post('api/tickets/:id/reassign')
   reassign(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
+    @CurrentActor() actor: Actor,
     @Param('id') id: string,
     @Body() body: { userId: string },
   ) {
-    return this.app.reassign(role, user, id, body.userId);
+    return this.app.reassign(actor.role, actor.id, id, body.userId);
   }
 
   @Post('api/tickets/:id/status')
   status(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
+    @CurrentActor() actor: Actor,
     @Param('id') id: string,
     @Body() body: { status: string },
   ) {
-    return this.app.changeStatus(role, user, id, body.status);
+    return this.app.changeStatus(actor.role, actor.id, id, body.status);
   }
 
   @Post('api/simulator/inbound')
@@ -138,11 +130,8 @@ export class AppController {
   }
 
   @Get('api/reports')
-  reports(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
-  ) {
-    return this.app.reports(role, user);
+  reports(@CurrentActor() actor: Actor) {
+    return this.app.reports(actor.role, actor.id);
   }
 
   @Get('api/reports.csv')
@@ -151,22 +140,15 @@ export class AppController {
     'Content-Disposition',
     'attachment; filename="gsm-casedesk-report.csv"',
   )
-  reportCsv(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
-  ) {
-    return this.app.reportCsv(role, user);
+  reportCsv(@CurrentActor() actor: Actor) {
+    return this.app.reportCsv(actor.role, actor.id);
   }
 
   /** SOP Step 6 daily log for one day (YYYY-MM-DD, Lusaka time; defaults to today). */
   @Get('api/reports/daily-log.csv')
   @Header('Content-Type', 'text/csv; charset=utf-8')
   @Header('Content-Disposition', 'attachment; filename="gsm-daily-log.csv"')
-  async dailyLog(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
-    @Query('date') date?: string,
-  ) {
-    return (await this.app.dailyLogCsv(role, user, date)).csv;
+  async dailyLog(@CurrentActor() actor: Actor, @Query('date') date?: string) {
+    return (await this.app.dailyLogCsv(actor.role, actor.id, date)).csv;
   }
 }

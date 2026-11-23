@@ -82,13 +82,15 @@ type Draft = { text: string; templateId?: string };
 
 function useNames() {
   const dashboard = useDashboard();
+  const { identity, mode } = useIdentity();
   return useMemo(() => {
-    const names = new Map<string, string>(IDENTITIES.map((item) => [item.id, item.name]));
+    const names = new Map<string, string>(mode === "demo" ? IDENTITIES.map((item) => [item.id, item.name]) : []);
+    names.set(identity.id, identity.name);
     dashboard.data?.workload.forEach((item) => names.set(item.id, item.name));
     names.set("system", "System");
     names.set("bot", "GSM Bot");
     return names;
-  }, [dashboard.data]);
+  }, [dashboard.data, identity.id, identity.name, mode]);
 }
 
 /** Open work sorted by SLA urgency (soonest due first), then most recent activity. */

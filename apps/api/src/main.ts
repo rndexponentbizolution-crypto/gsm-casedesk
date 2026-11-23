@@ -1,3 +1,7 @@
+// Must run before anything that reads process.env (e.g. the auth guard).
+import { loadEnv } from './load-env';
+loadEnv();
+
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ValidationPipe } from '@nestjs/common';

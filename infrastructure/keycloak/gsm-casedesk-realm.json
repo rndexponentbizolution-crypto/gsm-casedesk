@@ -1,15 +1,90 @@
 {
   "realm": "gsm-casedesk",
   "enabled": true,
+  "displayName": "GSM CaseDesk",
   "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
   "loginWithEmailAllowed": true,
+  "bruteForceProtected": true,
+  "sslRequired": "external",
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
   "clients": [
     {
       "clientId": "gsm-casedesk-api",
+      "name": "GSM CaseDesk API",
+      "enabled": true,
+      "bearerOnly": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false
+    },
+    {
+      "clientId": "gsm-casedesk-web",
+      "name": "GSM CaseDesk",
       "enabled": true,
       "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
       "redirectUris": ["http://localhost:3000/*"],
-      "webOrigins": ["http://localhost:3000"]
+      "webOrigins": ["http://localhost:3000"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:3000/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "casedesk-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "gsm-casedesk-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "id": "demo-supervisor",
+      "username": "chanda",
+      "email": "chanda@casedesk.invalid",
+      "emailVerified": true,
+      "firstName": "Chanda",
+      "lastName": "Mwansa",
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "casedesk-dev", "temporary": false }
+      ]
+    },
+    {
+      "id": "demo-agent-1",
+      "username": "martha",
+      "email": "martha@casedesk.invalid",
+      "emailVerified": true,
+      "firstName": "Martha",
+      "lastName": "Banda",
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "casedesk-dev", "temporary": false }
+      ]
+    },
+    {
+      "id": "demo-agent-2",
+      "username": "peter",
+      "email": "peter@casedesk.invalid",
+      "emailVerified": true,
+      "firstName": "Peter",
+      "lastName": "Mulenga",
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "casedesk-dev", "temporary": false }
+      ]
     }
   ]
 }

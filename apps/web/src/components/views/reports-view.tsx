@@ -45,7 +45,7 @@ export function ReportsView() {
     setExporting(true);
     setExportError(null);
     try {
-      await downloadReportCsv(identity);
+      await downloadReportCsv();
     } catch (error) {
       setExportError(error);
     } finally {
@@ -58,7 +58,7 @@ export function ReportsView() {
     setLogBusy(true);
     setExportError(null);
     try {
-      await downloadDailyLog(identity, logDay);
+      await downloadDailyLog(logDay);
     } catch (error) {
       setExportError(error);
     } finally {
