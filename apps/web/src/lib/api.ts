@@ -1,7 +1,8 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useIdentity, type Identity } from "./identity";
+import { useIdentity, type Permission, type Role } from "./identity";
+import { authHeaders, handleUnauthorized } from "./session";
 
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001").replace(/\/$/, "");
 
@@ -27,6 +28,17 @@ export type Message = {
   interactive?: { type?: "list"; button?: string; options?: MenuOption[]; replyId?: string } | null;
   mediaType?: string | null;
   createdAt: string;
+  attachments?: Attachment[];
+};
+
+export type Attachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  /** CLEAN, NOT_SCANNED, INFECTED or SCAN_FAILED */
+  scanStatus: string;
+  available: boolean;
 };
 
 export type MenuOption = { id: string; title: string };
@@ -155,30 +167,56 @@ export type FieldAgent = {
 
 export type Health = { status: string; database?: "ok" | "error"; mode: string; timestamp: string };
 
+export type OutboundIssue = {
+  id: string;
+  /** FAILED, AMBIGUOUS (delivery unknown) or PENDING (retrying) */
+  status: string;
+  attempts: number;
+  error: string | null;
+  nextAttemptAt: string | null;
+  updatedAt: string;
+  to: string | null;
+  preview: string;
+  ticketId: string | null;
+  reference: string | null;
+};
+
+export type InboundIssue = {
+  id: string;
+  status: string;
+  attempts: number;
+  error: string | null;
+  from: string | null;
+  type: string | null;
+  preview: string;
+  receivedAt: string;
+};
+
+export type Operations = { mode: "simulation" | "live"; outbound: OutboundIssue[]; inbound: InboundIssue[] };
+
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
   }
 }
 
-function identityHeaders(identity: Identity): Record<string, string> {
-  return { "x-demo-role": identity.role, "x-demo-user": identity.id };
-}
-
-export async function apiFetch<T>(path: string, identity: Identity | null, init: RequestInit = {}): Promise<T> {
+export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const auth = await authHeaders();
   let response: Response;
   try {
     response = await fetch(`${API_URL}${path}`, {
       ...init,
       headers: {
-        ...(identity ? identityHeaders(identity) : {}),
-        ...(init.body ? { "Content-Type": "application/json" } : {}),
+        ...auth,
+        // FormData sets its own multipart boundary; only JSON strings need this.
+        ...(typeof init.body === "string" ? { "Content-Type": "application/json" } : {}),
         ...init.headers,
       },
     });
   } catch {
     throw new ApiError("Cannot reach the CaseDesk API. It may be waking up — try again in a moment.", 0);
   }
+  if (response.status === 401) handleUnauthorized();
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
     try {
@@ -200,7 +238,7 @@ export function useTickets() {
   const { identity } = useIdentity();
   return useQuery({
     queryKey: ["tickets", identity.id],
-    queryFn: () => apiFetch<Ticket[]>("/api/tickets", identity),
+    queryFn: () => apiFetch<Ticket[]>("/api/tickets"),
     // PIN resets carry a 5-minute SLA, so keep the queue fresh.
     refetchInterval: 8_000,
   });
@@ -210,17 +248,17 @@ export function useDashboard() {
   const { identity } = useIdentity();
   return useQuery({
     queryKey: ["dashboard", identity.id],
-    queryFn: () => apiFetch<Dashboard>("/api/dashboard", identity),
+    queryFn: () => apiFetch<Dashboard>("/api/dashboard"),
     refetchInterval: 30_000,
   });
 }
 
 export function useReports() {
-  const { identity } = useIdentity();
+  const { identity, can } = useIdentity();
   return useQuery({
     queryKey: ["reports", identity.id],
-    queryFn: () => apiFetch<Report>("/api/reports", identity),
-    enabled: identity.role !== "BACK_OFFICE",
+    queryFn: () => apiFetch<Report>("/api/reports"),
+    enabled: can("reports.view"),
     refetchInterval: 60_000,
   });
 }
@@ -228,7 +266,7 @@ export function useReports() {
 export function useFieldAgents() {
   return useQuery({
     queryKey: ["field-agents"],
-    queryFn: () => apiFetch<FieldAgent[]>("/api/field-agents", null),
+    queryFn: () => apiFetch<FieldAgent[]>("/api/field-agents"),
     staleTime: 60_000,
   });
 }
@@ -236,7 +274,7 @@ export function useFieldAgents() {
 export function useResponses() {
   return useQuery({
     queryKey: ["responses"],
-    queryFn: () => apiFetch<StandardResponse[]>("/api/responses", null),
+    queryFn: () => apiFetch<StandardResponse[]>("/api/responses"),
     staleTime: Infinity,
   });
 }
@@ -244,15 +282,25 @@ export function useResponses() {
 export function useQueryTypes() {
   return useQuery({
     queryKey: ["query-types"],
-    queryFn: () => apiFetch<QueryType[]>("/api/query-types", null),
+    queryFn: () => apiFetch<QueryType[]>("/api/query-types"),
     staleTime: Infinity,
+  });
+}
+
+export function useOperations() {
+  const { identity, can } = useIdentity();
+  return useQuery({
+    queryKey: ["operations", identity.id],
+    queryFn: () => apiFetch<Operations>("/api/operations"),
+    enabled: can("operations.manage"),
+    refetchInterval: 15_000,
   });
 }
 
 export function useHealth() {
   return useQuery({
     queryKey: ["health"],
-    queryFn: () => apiFetch<Health>("/health", null),
+    queryFn: () => apiFetch<Health>("/health"),
     refetchInterval: 60_000,
     retry: 1,
   });
@@ -287,7 +335,7 @@ function useAfterWrite() {
         ),
       );
     }
-    for (const key of ["tickets", "dashboard", "reports"]) void client.invalidateQueries({ queryKey: [key] });
+    for (const key of ["tickets", "dashboard", "reports", "operations"]) void client.invalidateQueries({ queryKey: [key] });
   };
 }
 
@@ -296,7 +344,7 @@ export function useReply(ticketId: string) {
   const afterWrite = useAfterWrite();
   return useMutation({
     mutationFn: (input: { text: string; templateId?: string }) =>
-      apiFetch<Ticket>(`/api/tickets/${ticketId}/reply`, identity, { method: "POST", body: JSON.stringify(input) }),
+      apiFetch<Ticket>(`/api/tickets/${ticketId}/reply`, { method: "POST", body: JSON.stringify(input) }),
     onSuccess: (ticket) => afterWrite(ticket),
   });
 }
@@ -306,7 +354,7 @@ export function useChangeStatus(ticketId: string) {
   const afterWrite = useAfterWrite();
   return useMutation({
     mutationFn: (status: TicketStatus) =>
-      apiFetch<Ticket>(`/api/tickets/${ticketId}/status`, identity, { method: "POST", body: JSON.stringify({ status }) }),
+      apiFetch<Ticket>(`/api/tickets/${ticketId}/status`, { method: "POST", body: JSON.stringify({ status }) }),
     onSuccess: (ticket) => afterWrite(ticket),
   });
 }
@@ -316,7 +364,7 @@ export function useReassign(ticketId: string) {
   const afterWrite = useAfterWrite();
   return useMutation({
     mutationFn: (userId: string) =>
-      apiFetch<Ticket>(`/api/tickets/${ticketId}/reassign`, identity, { method: "POST", body: JSON.stringify({ userId }) }),
+      apiFetch<Ticket>(`/api/tickets/${ticketId}/reassign`, { method: "POST", body: JSON.stringify({ userId }) }),
     onSuccess: (ticket) => afterWrite(ticket),
   });
 }
@@ -326,27 +374,138 @@ export function useUpdateCase(ticketId: string) {
   const afterWrite = useAfterWrite();
   return useMutation({
     mutationFn: (patch: { queryType?: string; details?: Partial<CaseDetails> }) =>
-      apiFetch<Ticket>(`/api/tickets/${ticketId}/case`, identity, { method: "PATCH", body: JSON.stringify(patch) }),
+      apiFetch<Ticket>(`/api/tickets/${ticketId}/case`, { method: "PATCH", body: JSON.stringify(patch) }),
     onSuccess: (ticket) => afterWrite(ticket),
   });
 }
 
-export type InboundInput = { phone: string; text?: string; replyId?: string; mediaType?: string };
-
-export function useSimulateInbound() {
+/** Send a file (with an optional caption) to the field agent on WhatsApp. */
+export function useSendMedia(ticketId: string) {
   const afterWrite = useAfterWrite();
   return useMutation({
-    mutationFn: (input: InboundInput) =>
-      apiFetch<{ ticketId: string | null; reference: string | null; duplicate: boolean; botState?: BotState }>("/api/simulator/inbound", null, {
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
+    mutationFn: (input: { file: File; caption?: string }) => {
+      const form = new FormData();
+      form.append("file", input.file);
+      if (input.caption) form.append("caption", input.caption);
+      return apiFetch<Ticket>(`/api/tickets/${ticketId}/media`, { method: "POST", body: form });
+    },
+    onSuccess: (ticket) => afterWrite(ticket),
+  });
+}
+
+/** Supervisor actions on failed or stuck messages. */
+export function useOperationAction() {
+  const afterWrite = useAfterWrite();
+  return useMutation({
+    mutationFn: (input: { kind: "outbound" | "inbound"; id: string; action: "retry" | "dismiss" }) =>
+      apiFetch<{ id: string; status: string }>(`/api/operations/${input.kind}/${input.id}/${input.action}`, { method: "POST" }),
     onSuccess: () => afterWrite(),
   });
 }
 
-function saveCsv(csv: string, filename: string) {
-  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+// ---------- administration ----------
+
+export type StaffMember = {
+  id: string;
+  name: string;
+  email: string;
+  role: Role;
+  team: string | null;
+  active: boolean;
+  availability: boolean;
+  capacity: number;
+  grantedPermissions: Permission[];
+  revokedPermissions: Permission[];
+  permissions: Permission[];
+  createdAt: string;
+};
+
+export type PermissionCatalog = {
+  permissions: Array<{ key: Permission; description: string }>;
+  roles: Array<{ key: Role; defaults: Permission[] }>;
+  /** False when the API has no Keycloak account-management secret. */
+  accountManagement: boolean;
+};
+
+export type StaffInput = Partial<Pick<StaffMember, "name" | "email" | "role" | "grantedPermissions" | "revokedPermissions" | "active" | "availability" | "capacity">>;
+
+export function useStaff() {
+  const { can } = useIdentity();
+  return useQuery({ queryKey: ["staff"], queryFn: () => apiFetch<StaffMember[]>("/api/staff"), enabled: can("staff.manage") });
+}
+
+export function usePermissionCatalog() {
+  const { can } = useIdentity();
+  return useQuery({
+    queryKey: ["permission-catalog"],
+    queryFn: () => apiFetch<PermissionCatalog>("/api/staff/permissions"),
+    enabled: can("staff.manage"),
+    staleTime: Infinity,
+  });
+}
+
+function useInvalidate(...keys: string[]) {
+  const client = useQueryClient();
+  return () => {
+    for (const key of keys) void client.invalidateQueries({ queryKey: [key] });
+  };
+}
+
+/** Creates the account; the result holds a one-time temporary password to hand over. */
+export function useCreateStaff() {
+  const invalidate = useInvalidate("staff", "dashboard");
+  return useMutation({
+    mutationFn: (input: StaffInput) =>
+      apiFetch<{ staff: StaffMember; temporaryPassword: string }>("/api/staff", { method: "POST", body: JSON.stringify(input) }),
+    onSuccess: invalidate,
+  });
+}
+
+export function useUpdateStaff() {
+  const invalidate = useInvalidate("staff", "dashboard", "tickets");
+  return useMutation({
+    mutationFn: ({ id, ...input }: StaffInput & { id: string }) =>
+      apiFetch<{ staff: StaffMember; openTicketsToReassign: number }>(`/api/staff/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
+    onSuccess: invalidate,
+  });
+}
+
+export function useResetPassword() {
+  return useMutation({
+    mutationFn: (id: string) => apiFetch<{ temporaryPassword: string }>(`/api/staff/${id}/reset-password`, { method: "POST" }),
+  });
+}
+
+export type FieldAgentInput = Partial<Pick<FieldAgent, "name" | "phone" | "employeeId" | "region" | "storeName" | "shopType" | "active">>;
+
+export function useSaveFieldAgent() {
+  const invalidate = useInvalidate("field-agents");
+  return useMutation({
+    mutationFn: ({ id, ...input }: FieldAgentInput & { id?: string }) =>
+      apiFetch<FieldAgent>(id ? `/api/field-agents/${id}` : "/api/field-agents", { method: id ? "PATCH" : "POST", body: JSON.stringify(input) }),
+    onSuccess: invalidate,
+  });
+}
+
+/** Downloads an attachment with the signed-in user's credentials. */
+export async function downloadAttachment(attachment: Pick<Attachment, "id" | "name">) {
+  const response = await fetch(`${API_URL}/api/attachments/${attachment.id}`, { headers: await authHeaders() });
+  if (response.status === 401) handleUnauthorized();
+  if (!response.ok) {
+    let message = `Download failed (${response.status})`;
+    try {
+      const body = await response.json();
+      if (typeof body?.message === "string") message = body.message;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(message, response.status);
+  }
+  saveBlob(await response.blob(), attachment.name);
+}
+
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = filename;
@@ -354,11 +513,15 @@ function saveCsv(csv: string, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-export async function downloadReportCsv(identity: Identity) {
-  saveCsv(await apiFetch<string>("/api/reports.csv", identity), `gsm-casedesk-report-${new Date().toISOString().slice(0, 10)}.csv`);
+function saveCsv(csv: string, filename: string) {
+  saveBlob(new Blob([csv], { type: "text/csv;charset=utf-8" }), filename);
+}
+
+export async function downloadReportCsv() {
+  saveCsv(await apiFetch<string>("/api/reports.csv"), `gsm-casedesk-report-${new Date().toISOString().slice(0, 10)}.csv`);
 }
 
 /** SOP Step 6 daily log for one day (YYYY-MM-DD). */
-export async function downloadDailyLog(identity: Identity, day: string) {
-  saveCsv(await apiFetch<string>(`/api/reports/daily-log.csv?date=${encodeURIComponent(day)}`, identity), `gsm-daily-log-${day}.csv`);
+export async function downloadDailyLog(day: string) {
+  saveCsv(await apiFetch<string>(`/api/reports/daily-log.csv?date=${encodeURIComponent(day)}`), `gsm-daily-log-${day}.csv`);
 }

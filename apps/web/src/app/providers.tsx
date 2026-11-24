@@ -2,7 +2,6 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { SimulatorProvider } from "@/components/simulator";
 import { IdentityProvider } from "@/lib/identity";
 
 let browserQueryClient: QueryClient | undefined;
@@ -26,7 +25,7 @@ export function Providers({ children }: { children: ReactNode }) {
   return (
     <QueryClientProvider client={getQueryClient()}>
       <IdentityProvider>
-        <SimulatorProvider>{children}</SimulatorProvider>
+        {children}
       </IdentityProvider>
     </QueryClientProvider>
   );

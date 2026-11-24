@@ -5,18 +5,27 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, TicketStatus } from '@prisma/client';
-import { createHash, randomUUID } from 'crypto';
+import { randomUUID } from 'crypto';
+import { AuditService, type Tx } from './audit.service';
 import {
   BOT_HANDLED,
   BOT_TEXT,
   type BotState,
   extractMsisdn,
+  type InteractiveList,
   isPinResetPhrase,
   isRestartPhrase,
   listOf,
   matchOption,
   MENUS,
 } from './bot';
+import { messagingMode } from './config';
+import {
+  type Access,
+  can,
+  effectivePermissions,
+  requirePermission,
+} from './permissions';
 import { PrismaService } from './prisma.service';
 import {
   CONVERSATION_RESET_MS,
@@ -31,14 +40,15 @@ import {
   RESPONSES,
   type ResponseEffect,
 } from './responses';
-
-type Tx = Prisma.TransactionClient;
+import { SERVABLE, ScannerService, type ScanStatus } from './scanner';
+import { StorageService } from './storage';
+import type { OutboundPayload } from './whatsapp';
 
 const DEFAULT_TEAM = 'Zambia Field Support';
 const CLOSED_STATES: TicketStatus[] = ['RESOLVED', 'CLOSED'];
 const TX_OPTIONS = { timeout: 20000, maxWait: 10000 };
-// Serialises writers to the audit hash chain (and ticket reference numbering).
-const AUDIT_LOCK_KEY = 7342001;
+/** Inbound events still unprocessed after this long count as stuck. */
+export const STUCK_AFTER_MS = 2 * 60 * 1000;
 // Zambia is UTC+2 all year (no DST); used for the daily log's calendar day.
 const LUSAKA_OFFSET_MS = 2 * 60 * 60 * 1000;
 
@@ -63,7 +73,10 @@ const ticketInclude = {
     include: { user: true },
     orderBy: { createdAt: 'desc' },
   },
-  messages: { orderBy: { createdAt: 'asc' } },
+  messages: {
+    orderBy: { createdAt: 'asc' },
+    include: { attachments: { orderBy: { createdAt: 'asc' } } },
+  },
   auditEvents: { orderBy: { createdAt: 'asc' }, include: { actor: true } },
 } satisfies Prisma.TicketInclude;
 
@@ -132,6 +145,15 @@ export interface Ticket {
     interactive: unknown;
     mediaType: string | null;
     createdAt: string;
+    attachments: Array<{
+      id: string;
+      name: string;
+      mimeType: string;
+      size: number;
+      scanStatus: string;
+      /** False while scanning failed or the file was found infected. */
+      available: boolean;
+    }>;
   }>;
   audit: Array<{
     id: string;
@@ -150,10 +172,48 @@ export interface InboundInput {
   providerId?: string;
   /** Interactive list/button reply id (WhatsApp "list_reply.id"). */
   replyId?: string;
+  /** A file that arrived with the message, already stored and scanned. */
+  media?: StoredFile & { providerMediaId?: string };
 }
 
-const isPrivileged = (role: string) =>
-  role === 'SUPERVISOR' || role === 'ADMINISTRATOR';
+/** A file that has been scanned and (unless infected) written to storage. */
+export interface StoredFile {
+  storageKey: string | null;
+  name: string;
+  mimeType: string;
+  size: number;
+  scanStatus: ScanStatus;
+}
+
+/** Files staff may send, and the WhatsApp message type each goes out as. */
+export const SENDABLE_MEDIA: Record<string, 'image' | 'document' | 'audio' | 'video'> = {
+  'image/jpeg': 'image',
+  'image/png': 'image',
+  'application/pdf': 'document',
+  'application/msword': 'document',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+    'document',
+  'application/vnd.ms-excel': 'document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+    'document',
+  'text/plain': 'document',
+  'audio/mpeg': 'audio',
+  'audio/ogg': 'audio',
+  'video/mp4': 'video',
+};
+/** WhatsApp's documented upload limits are 5 MB for images, 16 MB for audio/video, 100 MB for documents; CaseDesk caps everything at 16 MB. */
+export const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
+
+/** Digits-only and "+digits" forms of a phone number, for matching stored numbers. */
+const phoneForms = (phone: string) => {
+  const digits = phone.replace(/\D/g, '');
+  return [...new Set([phone, `+${digits}`, digits])];
+};
+
+/** The message mediaType label for a MIME type ("image", "document", ...). */
+export const mediaKind = (mimeType: string) =>
+  SENDABLE_MEDIA[mimeType] ??
+  (/^(image|audio|video)\//.exec(mimeType)?.[1] || 'document');
 
 const asDetails = (value: Prisma.JsonValue | null): CaseDetails =>
   value && typeof value === 'object' && !Array.isArray(value)
@@ -166,7 +226,16 @@ const addTags = (current: string[], ...next: string[]) => [
 
 @Injectable()
 export class AppService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audits: AuditService,
+    private readonly storage: StorageService,
+    private readonly scanner: ScannerService,
+  ) {}
+
+  private get live() {
+    return messagingMode() === 'live';
+  }
 
   // ---------- reference data ----------
 
@@ -240,9 +309,24 @@ export class AppService {
         interactive: message.interactive,
         mediaType: message.mediaType,
         createdAt: message.createdAt.toISOString(),
+        attachments: message.attachments.map((file) => ({
+          id: file.id,
+          name: file.name,
+          mimeType: file.mimeType,
+          size: file.size,
+          scanStatus: file.scanStatus,
+          available:
+            Boolean(file.storageKey) &&
+            SERVABLE.includes(file.scanStatus as ScanStatus),
+        })),
       })),
       audit: record.auditEvents.map((event) => {
-        const metadata = (event.metadata ?? {}) as Record<string, unknown>;
+        // `_v` is the audit hash format version, not something to show.
+        const { _v, ...metadata } = (event.metadata ?? {}) as Record<
+          string,
+          unknown
+        >;
+        void _v;
         return {
           id: event.id,
           type: event.eventType,
@@ -256,37 +340,47 @@ export class AppService {
     };
   }
 
-  private visibilityWhere(role: string, user: string): Prisma.TicketWhereInput {
-    if (isPrivileged(role)) return {};
+  private visibilityWhere(actor: Access): Prisma.TicketWhereInput {
+    if (can(actor, 'tickets.view_all')) return {};
+    const user = actor.id;
     return {
       assignments: { some: { active: true, user: { keycloakId: user } } },
     };
   }
 
-  private authorised(role: string, user: string, ticket: Ticket) {
-    return isPrivileged(role) || ticket.assignedUserId === user;
+  private authorised(actor: Access, ticket: Ticket) {
+    return can(actor, 'tickets.view_all') || ticket.assignedUserId === actor.id;
   }
 
   private async loadTicket(id: string, db: Tx | PrismaService = this.prisma) {
     return db.ticket.findUnique({ where: { id }, include: ticketInclude });
   }
 
-  private async loadAuthorised(role: string, user: string, id: string) {
+  private async loadAuthorised(actor: Access, id: string) {
+    const user = actor.id;
     const record = await this.loadTicket(id);
     if (!record) throw new NotFoundException('Ticket not found');
     const ticket = this.toDto(record);
-    if (!this.authorised(role, user, ticket))
+    if (!this.authorised(actor, ticket)) {
+      await this.denied(user, id);
       throw new ForbiddenException('Not authorised');
+    }
     return ticket;
   }
 
-  private async visible(
-    role: string,
-    user: string,
+  /** Audits a refused attempt to reach a ticket the user may not see. */
+  private async denied(user: string, ticketId: string) {
+    await this.audits.recordNow(ticketId, user, 'ACCESS_DENIED', {
+      resource: 'ticket',
+    });
+  }
+
+  private async visible(actor: Access,
     extra: Prisma.TicketWhereInput = {},
   ) {
+    const user = actor.id;
     const records = await this.prisma.ticket.findMany({
-      where: { AND: [this.visibilityWhere(role, user), extra] },
+      where: { AND: [this.visibilityWhere(actor), extra] },
       include: ticketInclude,
       orderBy: { lastMessageAt: 'desc' },
     });
@@ -297,50 +391,6 @@ export class AppService {
     return this.prisma.user.findMany({
       where: { role: 'BACK_OFFICE', active: true },
       orderBy: { keycloakId: 'asc' },
-    });
-  }
-
-  // ---------- audit chain ----------
-
-  private async lockChain(tx: Tx) {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${AUDIT_LOCK_KEY})`;
-  }
-
-  private async audit(
-    tx: Tx,
-    ticketId: string | null,
-    actor: string,
-    type: string,
-    metadata: Record<string, unknown> = {},
-  ) {
-    const actorUser =
-      actor === 'system' || actor === 'bot'
-        ? null
-        : await tx.user.findUnique({ where: { keycloakId: actor } });
-    const previous = await tx.auditEvent.findFirst({
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      select: { hash: true, createdAt: true },
-    });
-    // Keep the chain strictly time-ordered so "latest" is unambiguous.
-    let createdAt = new Date();
-    if (previous && createdAt.getTime() <= previous.createdAt.getTime())
-      createdAt = new Date(previous.createdAt.getTime() + 1);
-    const payload = { ...metadata, actor };
-    const hash = createHash('sha256')
-      .update(
-        `${previous?.hash ?? ''}|${actor}|${type}|${JSON.stringify(payload)}|${ticketId ?? ''}|${createdAt.toISOString()}`,
-      )
-      .digest('hex');
-    await tx.auditEvent.create({
-      data: {
-        ticketId,
-        actorId: actorUser?.id ?? null,
-        eventType: type,
-        metadata: payload as Prisma.InputJsonValue,
-        hash,
-        previousHash: previous?.hash ?? null,
-        createdAt,
-      },
     });
   }
 
@@ -408,10 +458,24 @@ export class AppService {
 
   // ---------- queries ----------
 
-  async dashboard(role: string, user: string) {
-    const [visible, staff] = await Promise.all([
-      this.visible(role, user),
+  async dashboard(actor: Access) {
+    const [visible, staff, stuckInbound] = await Promise.all([
+      this.visible(actor),
       this.backOfficeUsers(),
+      // Webhook events are not tied to a ticket yet, so only operations staff see them.
+      can(actor, 'operations.manage')
+        ? this.prisma.inboundWebhookEvent.count({
+            where: {
+              OR: [
+                { status: 'FAILED' },
+                {
+                  status: { in: ['RECEIVED', 'PROCESSING'] },
+                  createdAt: { lt: new Date(Date.now() - STUCK_AFTER_MS) },
+                },
+              ],
+            },
+          })
+        : Promise.resolve(0),
     ]);
     const now = Date.now();
     const counts = (status: TicketStatus) =>
@@ -436,8 +500,9 @@ export class AppService {
       ).length,
       failedOutbound: visible
         .flatMap((ticket) => ticket.messages)
-        .filter((message) => message.state === 'FAILED').length,
-      stuckInbound: 0,
+        .filter((message) => ['FAILED', 'AMBIGUOUS'].includes(message.state))
+        .length,
+      stuckInbound,
       workload: staff.map((item) => ({
         id: item.keycloakId,
         name: item.name,
@@ -451,15 +516,11 @@ export class AppService {
     };
   }
 
-  async tickets(role: string, user: string, status?: string) {
+  async tickets(actor: Access, status?: string) {
     if (status && !(status in TRANSITIONS))
       throw new BadRequestException(`Unknown status: ${status}`);
     const [visible, staff] = await Promise.all([
-      this.visible(
-        role,
-        user,
-        status ? { status: status as TicketStatus } : {},
-      ),
+      this.visible(actor, status ? { status: status as TicketStatus } : {}),
       this.prisma.user.findMany({ select: { keycloakId: true, name: true } }),
     ]);
     const names = new Map(staff.map((item) => [item.keycloakId, item.name]));
@@ -471,11 +532,14 @@ export class AppService {
     }));
   }
 
-  async ticket(role: string, user: string, id: string): Promise<Ticket | null> {
+  async ticket(actor: Access, id: string): Promise<Ticket | null> {
+    const user = actor.id;
     const record = await this.loadTicket(id);
     if (!record) return null;
     const ticket = this.toDto(record);
-    return this.authorised(role, user, ticket) ? ticket : null;
+    if (this.authorised(actor, ticket)) return ticket;
+    await this.denied(user, id);
+    return null;
   }
 
   async fieldAgents() {
@@ -495,6 +559,86 @@ export class AppService {
     }));
   }
 
+  // ---------- outbound ----------
+
+  /**
+   * Records an outbound message. In simulation it is "sent" at once. Live, it starts
+   * PENDING with an outbox row; the OutboxService delivers it to Meta and retries.
+   */
+  private async createOutbound(
+    tx: Tx,
+    args: {
+      ticketId: string;
+      conversationId: string;
+      body: string;
+      sender: string;
+      createdAt: Date;
+      templateId?: string;
+      interactive?: InteractiveList;
+      file?: StoredFile & {
+        mediaType: 'image' | 'document' | 'audio' | 'video';
+      };
+    },
+  ) {
+    const live = this.live;
+    const { file } = args;
+    const message = await tx.message.create({
+      data: {
+        ticketId: args.ticketId,
+        conversationId: args.conversationId,
+        direction: 'OUTBOUND',
+        body: args.body,
+        state: live ? 'PENDING' : 'SENT',
+        isSimulated: !live,
+        sender: args.sender,
+        templateId: args.templateId,
+        interactive: args.interactive as Prisma.InputJsonValue | undefined,
+        mediaType: file?.mediaType,
+        createdAt: args.createdAt,
+        attachments: file
+          ? {
+              create: {
+                name: file.name,
+                mimeType: file.mimeType,
+                size: file.size,
+                storageKey: file.storageKey,
+                scanStatus: file.scanStatus,
+              },
+            }
+          : undefined,
+      },
+    });
+    if (live) {
+      const { contact } = await tx.conversation.findUniqueOrThrow({
+        where: { id: args.conversationId },
+        include: { contact: true },
+      });
+      const payload: OutboundPayload = file
+        ? {
+            kind: 'media',
+            to: contact.phone,
+            mediaType: file.mediaType,
+            storageKey: file.storageKey!,
+            mimeType: file.mimeType,
+            filename: file.name,
+            caption: args.body || undefined,
+          }
+        : {
+            kind: 'text',
+            to: contact.phone,
+            body: args.body,
+            interactive: args.interactive,
+          };
+      await tx.outboundMessageOutbox.create({
+        data: {
+          messageId: message.id,
+          payload: payload as unknown as Prisma.InputJsonValue,
+        },
+      });
+    }
+    return message;
+  }
+
   // ---------- bot ----------
 
   private async botSay(
@@ -502,24 +646,18 @@ export class AppService {
     ticketId: string,
     conversationId: string,
     body: string,
-    interactive?: unknown,
+    interactive?: InteractiveList,
     templateId?: string,
   ) {
-    await tx.message.create({
-      data: {
-        ticketId,
-        conversationId,
-        direction: 'OUTBOUND',
-        body,
-        state: 'SENT',
-        isSimulated: true,
-        sender: 'bot',
-        templateId,
-        interactive: (interactive ?? undefined) as
-          Prisma.InputJsonValue | undefined,
-        // Bot replies land just after the inbound message that triggered them.
-        createdAt: new Date(Date.now() + 1),
-      },
+    await this.createOutbound(tx, {
+      ticketId,
+      conversationId,
+      body,
+      sender: 'bot',
+      templateId,
+      interactive,
+      // Bot replies land just after the inbound message that triggered them.
+      createdAt: new Date(Date.now() + 1),
     });
   }
 
@@ -563,7 +701,7 @@ export class AppService {
     });
     await this.botSay(tx, ticketId, conversationId, BOT_TEXT.pinDetails);
     await this.setBotState(tx, conversationId, 'AWAITING_PIN_DETAILS');
-    await this.audit(tx, ticketId, 'bot', 'BOT_QUERY_SELECTED', {
+    await this.audits.record(tx, ticketId, 'bot', 'BOT_QUERY_SELECTED', {
       queryType: 'PIN_RESET',
     });
   }
@@ -632,12 +770,12 @@ export class AppService {
           reason: 'PIN_RESET_HIGH_PRIORITY',
         },
       });
-      await this.audit(tx, ticketId, 'system', 'TICKET_ASSIGNED', {
+      await this.audits.record(tx, ticketId, 'system', 'TICKET_ASSIGNED', {
         userId: assignee.keycloakId,
         routing: 'HYBRID_LEAST_LOADED',
       });
     }
-    await this.audit(tx, ticketId, 'bot', 'PIN_RESET_ROUTED', {
+    await this.audits.record(tx, ticketId, 'bot', 'PIN_RESET_ROUTED', {
       slaMinutes: 5,
       priority: 'high',
     });
@@ -694,7 +832,7 @@ export class AppService {
       'Redirected to email',
     );
     // "notifyOperators": the field agent will escalate by email shortly.
-    await this.audit(tx, ticketId, 'bot', 'BOT_REDIRECTED_TO_EMAIL', {
+    await this.audits.record(tx, ticketId, 'bot', 'BOT_REDIRECTED_TO_EMAIL', {
       queryType,
       email: GSM_BACKOFFICE_EMAIL,
     });
@@ -769,14 +907,35 @@ export class AppService {
     // WITH_AGENT: a person is handling it; the bot stays quiet.
   }
 
-  async simulateInbound(body: InboundInput) {
-    return this.handleInbound(body, true);
+  /**
+   * Scans a file and writes it to storage under a fresh key. Infected files are
+   * not stored at all: the result has storageKey null and scanStatus INFECTED.
+   */
+  async storeFile(
+    buffer: Buffer,
+    name: string,
+    mimeType: string,
+  ): Promise<StoredFile> {
+    const safeName =
+      name.replace(/[^\w.\- ]+/g, '_').slice(-120) || 'attachment';
+    const scan = await this.scanner.scan(buffer);
+    const stored: StoredFile = {
+      storageKey: null,
+      name: safeName,
+      mimeType,
+      size: buffer.length,
+      scanStatus: scan.status,
+    };
+    if (scan.status === 'INFECTED') return stored;
+    stored.storageKey = `attachments/${new Date().toISOString().slice(0, 10)}/${randomUUID()}`;
+    await this.storage.put(stored.storageKey, buffer, mimeType);
+    return stored;
   }
 
-  /** Entry point for every inbound WhatsApp message (simulated or, later, from Meta). */
+  /** Entry point for every inbound WhatsApp message (simulated or from Meta's webhook). */
   async handleInbound(body: InboundInput, simulated: boolean) {
     const agent = await this.prisma.fieldAgent.findFirst({
-      where: { phone: body.phone, active: true },
+      where: { phone: { in: phoneForms(body.phone) }, active: true },
     });
     if (!agent)
       throw new BadRequestException(
@@ -787,7 +946,7 @@ export class AppService {
       (body.duplicate ? 'duplicate-preserved-id' : `sim-${randomUUID()}`);
 
     return this.prisma.$transaction(async (tx) => {
-      await this.lockChain(tx);
+      await this.audits.lock(tx);
 
       const contact = await tx.whatsAppContact.upsert({
         where: { phone: agent.phone },
@@ -810,7 +969,7 @@ export class AppService {
       const seen = await tx.message.findUnique({ where: { providerId } });
       if (seen) {
         if (ticket)
-          await this.audit(
+          await this.audits.record(
             tx,
             ticket.id,
             'system',
@@ -884,7 +1043,7 @@ export class AppService {
           'system',
           'Created from inbound message',
         );
-        await this.audit(tx, ticket.id, 'system', 'TICKET_CREATED', {
+        await this.audits.record(tx, ticket.id, 'system', 'TICKET_CREATED', {
           channel: 'whatsapp',
         });
       }
@@ -906,13 +1065,25 @@ export class AppService {
           state: 'DELIVERED',
           isSimulated: simulated,
           createdAt: now,
+          attachments: body.media
+            ? {
+                create: {
+                  name: body.media.name,
+                  mimeType: body.media.mimeType,
+                  size: body.media.size,
+                  storageKey: body.media.storageKey,
+                  scanStatus: body.media.scanStatus,
+                  providerMediaId: body.media.providerMediaId,
+                },
+              }
+            : undefined,
         },
       });
       await tx.ticket.update({
         where: { id: ticket.id },
         data: { lastMessageAt: now },
       });
-      await this.audit(tx, ticket.id, 'system', 'MESSAGE_RECEIVED', {
+      await this.audits.record(tx, ticket.id, 'system', 'MESSAGE_RECEIVED', {
         providerId,
         duplicate: Boolean(body.duplicate),
         simulated,
@@ -1051,12 +1222,12 @@ export class AppService {
       outcome,
     );
     if (effect.kind === 'escalate')
-      await this.audit(tx, ticket.id, user, 'TICKET_ESCALATED', {
+      await this.audits.record(tx, ticket.id, user, 'TICKET_ESCALATED', {
         subject: effect.subject,
         email: GSM_BACKOFFICE_EMAIL,
       });
     else if (status !== ticket.status)
-      await this.audit(
+      await this.audits.record(
         tx,
         ticket.id,
         user,
@@ -1066,14 +1237,14 @@ export class AppService {
     return status;
   }
 
-  async reply(
-    role: string,
-    user: string,
+  async reply(actor: Access,
     id: string,
     text?: string,
     templateId?: string,
   ) {
-    const ticket = await this.loadAuthorised(role, user, id);
+    const user = actor.id;
+    requirePermission(actor, 'tickets.reply');
+    const ticket = await this.loadAuthorised(actor, id);
     if (!text?.trim()) throw new BadRequestException('Reply text is required');
     if (CLOSED_STATES.includes(ticket.status))
       throw new BadRequestException('Reopen the case before replying');
@@ -1082,24 +1253,19 @@ export class AppService {
       throw new BadRequestException(`Unknown response: ${templateId}`);
 
     await this.prisma.$transaction(async (tx) => {
-      await this.lockChain(tx);
+      await this.audits.lock(tx);
       const now = new Date();
       const { conversationId } = await tx.ticket.findUniqueOrThrow({
         where: { id },
         select: { conversationId: true },
       });
-      await tx.message.create({
-        data: {
-          ticketId: ticket.id,
-          conversationId,
-          direction: 'OUTBOUND',
-          body: text.trim(),
-          state: 'SENT',
-          isSimulated: true,
-          sender: user,
-          templateId: template?.id,
-          createdAt: now,
-        },
+      const message = await this.createOutbound(tx, {
+        ticketId: ticket.id,
+        conversationId,
+        body: text.trim(),
+        sender: user,
+        templateId: template?.id,
+        createdAt: now,
       });
       await tx.ticket.update({
         where: { id },
@@ -1110,13 +1276,17 @@ export class AppService {
           acknowledgedAt: ticket.acknowledgedAt ? undefined : now,
         },
       });
-      await this.audit(tx, id, user, 'REPLY_SUBMITTED', {
-        simulated: true,
+      await this.audits.record(tx, id, user, 'REPLY_SUBMITTED', {
+        simulated: !this.live,
         templateId: template?.id ?? null,
       });
-      await this.audit(tx, id, user, 'MESSAGE_SENT', {
-        provider: 'simulation',
-      });
+      await this.audits.record(
+        tx,
+        id,
+        user,
+        this.live ? 'MESSAGE_QUEUED' : 'MESSAGE_SENT',
+        { provider: this.live ? 'meta' : 'simulation', messageId: message.id },
+      );
       const effect: ResponseEffect = template?.effect ?? { kind: 'info' };
       let status = await this.applyEffect(tx, ticket, effect, user, now);
       if (effect.kind === 'info' && status === 'ASSIGNED') {
@@ -1136,22 +1306,137 @@ export class AppService {
     return this.toDto((await this.loadTicket(id))!);
   }
 
-  async reassign(role: string, user: string, id: string, userId: string) {
-    if (!isPrivileged(role))
-      throw new ForbiddenException('Supervisor authorisation required');
+  /** Staff send a file (with an optional caption) to the field agent. */
+  async sendMedia(actor: Access,
+    id: string,
+    file: { buffer: Buffer; originalname: string; mimetype: string } | undefined,
+    caption?: string,
+  ) {
+    const user = actor.id;
+    requirePermission(actor, 'tickets.reply');
+    const ticket = await this.loadAuthorised(actor, id);
+    if (!file?.buffer?.length) throw new BadRequestException('A file is required');
+    if (CLOSED_STATES.includes(ticket.status))
+      throw new BadRequestException('Reopen the case before replying');
+    const mediaType = SENDABLE_MEDIA[file.mimetype];
+    if (!mediaType)
+      throw new BadRequestException(
+        `Files of type ${file.mimetype || 'unknown'} can't be sent on WhatsApp`,
+      );
+    if (file.buffer.length > MAX_MEDIA_BYTES)
+      throw new BadRequestException('Files must be 16 MB or smaller');
+    const stored = await this.storeFile(
+      file.buffer,
+      file.originalname,
+      file.mimetype,
+    );
+    if (stored.scanStatus === 'INFECTED') {
+      await this.audits.recordNow(id, user, 'ATTACHMENT_REJECTED', {
+        name: stored.name,
+        reason: 'virus scan',
+      });
+      throw new BadRequestException(
+        'The virus scanner flagged this file; it was not sent',
+      );
+    }
+    if (stored.scanStatus === 'SCAN_FAILED')
+      throw new BadRequestException(
+        'The file could not be virus-scanned; try again shortly',
+      );
+    const text = caption?.trim().slice(0, 1024) ?? '';
+    await this.prisma.$transaction(async (tx) => {
+      await this.audits.lock(tx);
+      const now = new Date();
+      const { conversationId } = await tx.ticket.findUniqueOrThrow({
+        where: { id },
+        select: { conversationId: true },
+      });
+      const message = await this.createOutbound(tx, {
+        ticketId: id,
+        conversationId,
+        body: text,
+        sender: user,
+        createdAt: now,
+        file: { ...stored, mediaType },
+      });
+      const status: TicketStatus =
+        ticket.status === 'ASSIGNED' ? 'IN_PROGRESS' : ticket.status;
+      await tx.ticket.update({
+        where: { id },
+        data: {
+          status,
+          lastMessageAt: now,
+          firstResponseAt: ticket.firstResponseAt ? undefined : now,
+          acknowledgedAt: ticket.acknowledgedAt ? undefined : now,
+        },
+      });
+      await this.recordStatus(tx, id, ticket.status, status, user, 'First reply');
+      await this.audits.record(
+        tx,
+        id,
+        user,
+        this.live ? 'MEDIA_QUEUED' : 'MEDIA_SENT',
+        {
+          messageId: message.id,
+          name: stored.name,
+          mimeType: stored.mimeType,
+          size: stored.size,
+          scanStatus: stored.scanStatus,
+        },
+      );
+      await this.closeConversationIfDone(tx, conversationId, status);
+    }, TX_OPTIONS);
+    return this.toDto((await this.loadTicket(id))!);
+  }
+
+  /** An attachment's bytes, for someone allowed to see its ticket. Audited. */
+  async attachment(actor: Access, attachmentId: string) {
+    const user = actor.id;
+    const file = await this.prisma.attachment.findUnique({
+      where: { id: attachmentId },
+      include: { message: { select: { ticketId: true } } },
+    });
+    if (!file) throw new NotFoundException('Attachment not found');
+    await this.loadAuthorised(actor, file.message.ticketId);
+    if (!file.storageKey || !SERVABLE.includes(file.scanStatus as ScanStatus))
+      throw new BadRequestException(
+        file.scanStatus === 'INFECTED'
+          ? 'This file was flagged by the virus scanner and is not available'
+          : 'This file is not available',
+      );
+    const body = await this.storage.get(file.storageKey);
+    await this.audits.recordNow(
+      file.message.ticketId,
+      user,
+      'ATTACHMENT_DOWNLOADED',
+      { attachmentId: file.id, name: file.name },
+    );
+    return { body, name: file.name, mimeType: file.mimeType };
+  }
+
+  async reassign(actor: Access, id: string, userId: string) {
+    const user = actor.id;
+    requirePermission(actor, 'tickets.reassign');
     const ticket = await this.prisma.ticket.findUnique({ where: { id } });
     if (!ticket) throw new NotFoundException('Ticket not found');
     const target = await this.prisma.user.findFirst({
-      where: { keycloakId: userId, role: 'BACK_OFFICE', active: true },
+      where: { keycloakId: userId, active: true },
     });
-    if (!target)
+    if (
+      !target ||
+      !effectivePermissions(
+        target.role,
+        target.grantedPermissions,
+        target.revokedPermissions,
+      ).includes('tickets.reply')
+    )
       throw new BadRequestException(
-        'Reassignment target is not an active back-office employee',
+        'Reassignment target is not an active staff member who can work tickets',
       );
     if (!target.availability)
       throw new BadRequestException('Reassignment target is unavailable');
     await this.prisma.$transaction(async (tx) => {
-      await this.lockChain(tx);
+      await this.audits.lock(tx);
       const previous = await tx.ticketAssignment.findFirst({
         where: { ticketId: id, active: true },
         include: { user: true },
@@ -1174,7 +1459,7 @@ export class AppService {
       await this.recordStatus(tx, id, ticket.status, next, user, 'Reassigned');
       if (!CLOSED_STATES.includes(next))
         await this.setBotState(tx, ticket.conversationId, 'WITH_AGENT');
-      await this.audit(tx, id, user, 'TICKET_REASSIGNED', {
+      await this.audits.record(tx, id, user, 'TICKET_REASSIGNED', {
         from: previous?.user.keycloakId ?? null,
         to: userId,
       });
@@ -1182,8 +1467,10 @@ export class AppService {
     return this.toDto((await this.loadTicket(id))!);
   }
 
-  async changeStatus(role: string, user: string, id: string, status: string) {
-    const ticket = await this.loadAuthorised(role, user, id);
+  async changeStatus(actor: Access, id: string, status: string) {
+    const user = actor.id;
+    requirePermission(actor, 'tickets.reply');
+    const ticket = await this.loadAuthorised(actor, id);
     if (!(status in TRANSITIONS))
       throw new BadRequestException(`Unknown status: ${status}`);
     const to = status as TicketStatus;
@@ -1193,7 +1480,7 @@ export class AppService {
       );
     }
     await this.prisma.$transaction(async (tx) => {
-      await this.lockChain(tx);
+      await this.audits.lock(tx);
       const now = new Date();
       const reopening =
         CLOSED_STATES.includes(ticket.status) && !CLOSED_STATES.includes(to);
@@ -1208,7 +1495,7 @@ export class AppService {
         },
       });
       await this.recordStatus(tx, id, ticket.status, to, user);
-      await this.audit(
+      await this.audits.record(
         tx,
         id,
         user,
@@ -1221,13 +1508,13 @@ export class AppService {
   }
 
   /** Update casework: query type, log fields, validation/verification checklists. */
-  async updateCase(
-    role: string,
-    user: string,
+  async updateCase(actor: Access,
     id: string,
     patch: { queryType?: string; details?: Record<string, unknown> },
   ) {
-    const ticket = await this.loadAuthorised(role, user, id);
+    const user = actor.id;
+    requirePermission(actor, 'tickets.reply');
+    const ticket = await this.loadAuthorised(actor, id);
     if (patch.queryType !== undefined && !isQueryType(patch.queryType))
       throw new BadRequestException(`Unknown query type: ${patch.queryType}`);
     const textFields = [
@@ -1275,7 +1562,7 @@ export class AppService {
     }
     const queryType = patch.queryType as QueryTypeKey | undefined;
     await this.prisma.$transaction(async (tx) => {
-      await this.lockChain(tx);
+      await this.audits.lock(tx);
       await tx.ticket.update({
         where: { id },
         data: {
@@ -1287,7 +1574,7 @@ export class AppService {
           acknowledgedAt: ticket.acknowledgedAt ? undefined : new Date(),
         },
       });
-      await this.audit(tx, id, user, 'CASE_UPDATED', {
+      await this.audits.record(tx, id, user, 'CASE_UPDATED', {
         fields: [...Object.keys(incoming), ...(queryType ? ['queryType'] : [])],
         ...(queryType ? { queryType } : {}),
       });
@@ -1297,11 +1584,10 @@ export class AppService {
 
   // ---------- reporting ----------
 
-  async reports(role: string, user: string) {
-    if (!isPrivileged(role))
-      throw new ForbiddenException('Supervisor authorisation required');
+  async reports(actor: Access) {
+    requirePermission(actor, 'reports.view');
     const [visible, staff] = await Promise.all([
-      this.visible(role, user),
+      this.visible(actor),
       this.backOfficeUsers(),
     ]);
     const now = Date.now();
@@ -1407,8 +1693,10 @@ export class AppService {
     };
   }
 
-  async reportCsv(role: string, user: string) {
-    const report = await this.reports(role, user);
+  async reportCsv(actor: Access) {
+    const user = actor.id;
+    requirePermission(actor, 'reports.export');
+    const report = await this.reports(actor);
     const rows = [
       ['metric', 'value'],
       ...Object.entries(report)
@@ -1424,13 +1712,16 @@ export class AppService {
       ['inbound_by_date', JSON.stringify(report.inboundByDate)],
       ['outbound_by_date', JSON.stringify(report.outboundByDate)],
     ];
+    await this.audits.recordNow(null, user, 'REPORT_EXPORTED', {
+      report: 'summary',
+    });
     return toCsv(rows);
   }
 
   /** The SOP's "GSM Back Office daily log" (Step 6), for one Lusaka calendar day. */
-  async dailyLogCsv(role: string, user: string, date?: string) {
-    if (!isPrivileged(role))
-      throw new ForbiddenException('Supervisor authorisation required');
+  async dailyLogCsv(actor: Access, date?: string) {
+    const user = actor.id;
+    requirePermission(actor, 'reports.export');
     const day =
       date && /^\d{4}-\d{2}-\d{2}$/.test(date)
         ? date
@@ -1439,7 +1730,7 @@ export class AppService {
       new Date(`${day}T00:00:00.000Z`).getTime() - LUSAKA_OFFSET_MS,
     );
     const end = new Date(start.getTime() + 24 * 3600_000);
-    const visible = await this.visible(role, user, {
+    const visible = await this.visible(actor, {
       createdAt: { gte: start, lt: end },
       queryType: { not: null },
     });
@@ -1492,6 +1783,11 @@ export class AppService {
           ];
         }),
     ];
+    await this.audits.recordNow(null, user, 'REPORT_EXPORTED', {
+      report: 'daily-log',
+      day,
+      rows: rows.length - 1,
+    });
     return { day, csv: toCsv(rows) };
   }
 }

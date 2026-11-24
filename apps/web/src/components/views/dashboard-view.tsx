@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, Inbox } from "lucide-react";
+import { AlertTriangle, ArrowRight, Inbox } from "lucide-react";
 import Link from "next/link";
 import { useMemo } from "react";
 import { useDashboard, useReports, useTickets } from "@/lib/api";
@@ -18,7 +18,7 @@ function greeting(hour: number) {
 }
 
 export function DashboardView() {
-  const { identity, isSupervisor } = useIdentity();
+  const { identity, isSupervisor, can } = useIdentity();
   const tickets = useTickets();
   const dashboard = useDashboard();
   const reports = useReports();
@@ -83,6 +83,26 @@ export function DashboardView() {
             }}
           />
         </div>
+      )}
+
+      {can("operations.manage") && dashboard.data && dashboard.data.failedOutbound + dashboard.data.stuckInbound > 0 && (
+        <Link
+          href="/operations"
+          className="mb-6 flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 hover:bg-red-100"
+        >
+          <AlertTriangle size={18} className="shrink-0" aria-hidden />
+          <span className="flex-1">
+            {[
+              dashboard.data.failedOutbound && `${dashboard.data.failedOutbound} message${dashboard.data.failedOutbound === 1 ? "" : "s"} not delivered`,
+              dashboard.data.stuckInbound && `${dashboard.data.stuckInbound} incoming message${dashboard.data.stuckInbound === 1 ? "" : "s"} stuck`,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
+          <span className="flex items-center gap-1 font-medium">
+            Review in Operations <ArrowRight size={14} aria-hidden />
+          </span>
+        </Link>
       )}
 
       {/* Headline + tiles */}
@@ -176,7 +196,7 @@ export function DashboardView() {
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-3">
-        {isSupervisor && (
+        {can("reports.view") && (
           <Card className="lg:col-span-2" title="Messages, last 14 days">
             {reports.isPending || !days.length ? (
               <Skeleton className="h-52" />
@@ -194,7 +214,7 @@ export function DashboardView() {
           </Card>
         )}
 
-        <Card title="Team workload" className={isSupervisor ? "" : "lg:col-span-3"}>
+        <Card title="Team workload" className={can("reports.view") ? "" : "lg:col-span-3"}>
           {dashboard.isPending ? (
             <Skeleton className="h-32" />
           ) : (

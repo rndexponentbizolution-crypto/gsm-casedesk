@@ -15,7 +15,8 @@ const lusakaDay = (nowMs: number) => new Date(nowMs + 2 * 3600_000).toISOString(
 const RANGES = [7, 14, 30] as const;
 
 export function ReportsView() {
-  const { identity, isSupervisor } = useIdentity();
+  const { identity, can } = useIdentity();
+  const canExport = can("reports.export");
   const reports = useReports();
   const [range, setRange] = useState<(typeof RANGES)[number]>(14);
   const [exporting, setExporting] = useState(false);
@@ -30,12 +31,12 @@ export function ReportsView() {
     if (now && !logDay) setLogDay(lusakaDay(now));
   }, [now, logDay]);
 
-  if (!isSupervisor)
+  if (!can("reports.view"))
     return (
       <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         <PageHeader title="Reports" />
         <Card>
-          <EmptyState icon={<Lock size={20} />} title="Supervisor access required" description="Reports cover the whole desk, so they're limited to supervisors and administrators." />
+          <EmptyState icon={<Lock size={20} />} title="You don't have access to this page" description="Ask an administrator for the view reports permission." />
         </Card>
       </div>
     );
@@ -45,7 +46,7 @@ export function ReportsView() {
     setExporting(true);
     setExportError(null);
     try {
-      await downloadReportCsv(identity);
+      await downloadReportCsv();
     } catch (error) {
       setExportError(error);
     } finally {
@@ -58,7 +59,7 @@ export function ReportsView() {
     setLogBusy(true);
     setExportError(null);
     try {
-      await downloadDailyLog(identity, logDay);
+      await downloadDailyLog(logDay);
     } catch (error) {
       setExportError(error);
     } finally {
@@ -75,9 +76,11 @@ export function ReportsView() {
         title="Reports"
         description="Volume, responsiveness and distribution across the desk."
         actions={
-          <Button size="sm" onClick={exportCsv} loading={exporting}>
-            <Download size={15} aria-hidden /> Export CSV
-          </Button>
+          canExport && (
+            <Button size="sm" onClick={exportCsv} loading={exporting}>
+              <Download size={15} aria-hidden /> Export CSV
+            </Button>
+          )
         }
       />
       {exportError ? (
@@ -91,6 +94,7 @@ export function ReportsView() {
         </div>
       )}
 
+      {canExport && (
       <section className="mb-6 flex flex-wrap items-center gap-4 rounded-xl border border-slate-200 bg-white p-4">
         <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-amber-50 text-amber-700">
           <ClipboardList size={20} aria-hidden />
@@ -108,6 +112,7 @@ export function ReportsView() {
           </Button>
         </div>
       </section>
+      )}
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         {reports.isPending ? (

@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Activity,
   AlertTriangle,
   BookOpenText,
   BarChart3,
@@ -8,24 +9,23 @@ import {
   Inbox,
   LayoutDashboard,
   Menu,
-  MessageSquarePlus,
   Settings,
   UserCog,
   Users,
   X,
   type LucideIcon,
+  LogOut,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useHealth, useTickets } from "@/lib/api";
 import { awaitingReply, cn } from "@/lib/format";
-import { IDENTITIES, useIdentity } from "@/lib/identity";
+import { useIdentity, type Permission } from "@/lib/identity";
 import { NewTicketAlerts } from "./alerts";
-import { useSimulator } from "./simulator";
-import { Avatar, Button } from "./ui";
+import { Avatar } from "./ui";
 
-type NavItem = { href: string; label: string; icon: LucideIcon; supervisorOnly?: boolean; badge?: "mine" | "escalated" | "all" };
+type NavItem = { href: string; label: string; icon: LucideIcon; permission?: Permission; badge?: "mine" | "escalated" | "all" };
 
 const NAV: Array<{ section: string; items: NavItem[] }> = [
   {
@@ -33,17 +33,18 @@ const NAV: Array<{ section: string; items: NavItem[] }> = [
     items: [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
       { href: "/tickets", label: "My tickets", icon: Inbox, badge: "mine" },
-      { href: "/tickets/all", label: "All tickets", icon: Inbox, badge: "all", supervisorOnly: true },
+      { href: "/tickets/all", label: "All tickets", icon: Inbox, badge: "all", permission: "tickets.view_all" },
       { href: "/tickets/escalated", label: "Escalated", icon: AlertTriangle, badge: "escalated" },
     ],
   },
   {
     section: "Manage",
     items: [
-      { href: "/reports", label: "Reports", icon: BarChart3, supervisorOnly: true },
+      { href: "/reports", label: "Reports", icon: BarChart3, permission: "reports.view" },
+      { href: "/operations", label: "Operations", icon: Activity, permission: "operations.manage" },
       { href: "/responses", label: "Responses", icon: BookOpenText },
       { href: "/field-agents", label: "Field agents", icon: Users },
-      { href: "/staff", label: "Staff", icon: UserCog, supervisorOnly: true },
+      { href: "/staff", label: "Staff & access", icon: UserCog, permission: "staff.manage" },
       { href: "/settings", label: "Settings", icon: Settings },
     ],
   },
@@ -78,7 +79,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
 function Sidebar({ onClose }: { onClose: () => void }) {
   const pathname = usePathname();
-  const { identity, isSupervisor } = useIdentity();
+  const { identity, can } = useIdentity();
   const tickets = useTickets();
   const health = useHealth();
 
@@ -109,7 +110,7 @@ function Sidebar({ onClose }: { onClose: () => void }) {
             <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-wider text-slate-500">{group.section}</p>
             <ul className="space-y-0.5">
               {group.items
-                .filter((item) => isSupervisor || !item.supervisorOnly)
+                .filter((item) => !item.permission || can(item.permission))
                 .map((item) => {
                   const active = pathname === item.href;
                   const count = item.badge ? counts[item.badge] : 0;
@@ -156,31 +157,26 @@ function Sidebar({ onClose }: { onClose: () => void }) {
           />
           {health.isError ? "API unreachable" : health.data?.database === "error" ? "Database unreachable" : health.data ? "API connected" : "Connecting…"}
         </div>
-        {health.data?.mode === "simulation" && <p className="mt-1 pl-4">WhatsApp: simulation mode</p>}
+        {health.data?.mode === "simulation" && <p className="mt-1 pl-4">WhatsApp: not connected</p>}
       </div>
     </>
   );
 }
 
 function Topbar({ onMenu }: { onMenu: () => void }) {
-  const simulator = useSimulator();
   return (
     <header className="sticky top-0 z-20 flex h-14 items-center gap-3 border-b border-slate-200 bg-white/90 px-4 backdrop-blur sm:px-6">
       <button onClick={onMenu} className="-ml-1 rounded-md p-1.5 text-slate-600 hover:bg-slate-100 lg:hidden" aria-label="Open menu">
         <Menu size={20} />
       </button>
       <div className="flex-1" />
-      <Button size="sm" variant="secondary" onClick={() => simulator.open()}>
-        <MessageSquarePlus size={15} aria-hidden />
-        <span className="hidden sm:inline">Field agent phone</span>
-      </Button>
       <IdentityMenu />
     </header>
   );
 }
 
 function IdentityMenu() {
-  const { identity, setIdentity } = useIdentity();
+  const { identity, signOut } = useIdentity();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -213,28 +209,15 @@ function IdentityMenu() {
       </button>
       {open && (
         <div role="menu" className="absolute right-0 top-full mt-2 w-64 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
-          <p className="px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-slate-400">Demo: view the desk as…</p>
-          {IDENTITIES.map((item) => (
-            <button
-              key={item.id}
-              role="menuitemradio"
-              aria-checked={item.id === identity.id}
-              onClick={() => {
-                setIdentity(item.id);
-                setOpen(false);
-              }}
-              className={cn(
-                "flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left hover:bg-slate-50",
-                item.id === identity.id && "bg-amber-50",
-              )}
-            >
-              <Avatar name={item.name} size={28} />
-              <span className="flex-1">
-                <span className="block text-sm text-slate-900">{item.name}</span>
-                <span className="block text-[11px] text-slate-500">{item.title}</span>
-              </span>
-            </button>
-          ))}
+          <p className="truncate px-2.5 pb-1.5 pt-1 text-[11px] text-slate-400">{identity.email}</p>
+          <button
+            role="menuitem"
+            onClick={() => signOut()}
+            className="flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+          >
+            <LogOut size={16} className="text-slate-400" aria-hidden />
+            Sign out
+          </button>
         </div>
       )}
     </div>

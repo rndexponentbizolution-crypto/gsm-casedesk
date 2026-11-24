@@ -3,10 +3,11 @@
 ## Phase status
 - [x] Foundation: monorepo, Prisma foundation, authentication configuration, documentation
 - [x] Core case management: scoped in-memory development services, field agents, tickets, routing
-- [x] Messaging: simulator and persistent-database-ready outbox/schema
+- [x] Messaging: signed Meta webhook, persistent inbound events and outbox
 - [x] Real-time inbox: responsive three-column UI and live API refresh
 - [x] Supervision: scoped dashboard metrics, report data and authorised CSV export
-- [ ] Reliability and security: basic tests and Compose exist; PostgreSQL/Keycloak/live WhatsApp require infrastructure
+- [x] Reliability and security: Keycloak sign-in with MFA-ready production realm, signed Meta webhook, outbox with retries, Operations view, S3 attachments with ClamAV scanning, rate limiting, startup config checks, verifiable audit chain
+- [ ] Go-live: hosted infrastructure, Meta business setup and MTN approval (see docs/PRODUCTION.md)
 
 ## Architecture
 - `apps/web`: Next.js TypeScript dashboard
@@ -18,7 +19,7 @@
 
 ## Implementation approach
 1. Establish npm workspaces and local services.
-2. Build the PostgreSQL/Prisma foundation and synthetic seed data.
+2. Build the PostgreSQL/Prisma foundation (reference data only; no sample people).
 3. Implement deny-by-default, team-scoped APIs and routing.
 4. Add persistent webhook/outbox processing and the official Meta adapter.
 5. Build the three-column inbox and supervisor views.

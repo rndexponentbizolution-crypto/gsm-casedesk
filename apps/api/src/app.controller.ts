@@ -4,56 +4,62 @@ import {
   Controller,
   Get,
   Header,
-  Headers,
   Param,
   Patch,
   Post,
   Query,
+  StreamableFile,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
-import { AppService } from './app.service';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { AppService, MAX_MEDIA_BYTES } from './app.service';
+import { type Actor, CurrentActor, Public } from './auth';
+import { messagingMode } from './config';
+
+const upload = FileInterceptor('file', {
+  limits: { fileSize: MAX_MEDIA_BYTES, files: 1 },
+});
+
+/** RFC 6266 filename, safe for any characters. */
+const disposition = (name: string) =>
+  `attachment; filename="${name.replace(/[^\w.\- ]+/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 
 @Controller()
 export class AppController {
   constructor(private readonly app: AppService) {}
 
+  @Public()
   @Get('health')
   async health() {
     const database = (await this.app.databaseReachable()) ? 'ok' : 'error';
     return {
       status: database === 'ok' ? 'ok' : 'degraded',
       database,
-      mode:
-        process.env.SIMULATION_ENABLED === 'false'
-          ? 'live-ready'
-          : 'simulation',
+      mode: messagingMode(),
       timestamp: new Date().toISOString(),
     };
   }
 
+  /** The signed-in user, as CaseDesk knows them, with their effective permissions. */
+  @Get('api/me')
+  me(@CurrentActor() actor: Actor) {
+    return actor;
+  }
+
   @Get('api/dashboard')
-  dashboard(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
-  ) {
-    return this.app.dashboard(role, user);
+  dashboard(@CurrentActor() actor: Actor) {
+    return this.app.dashboard(actor);
   }
 
   @Get('api/tickets')
-  tickets(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
-    @Query('status') status?: string,
-  ) {
-    return this.app.tickets(role, user, status);
+  tickets(@CurrentActor() actor: Actor, @Query('status') status?: string) {
+    return this.app.tickets(actor, status);
   }
 
   @Get('api/tickets/:id')
-  async ticket(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
-    @Param('id') id: string,
-  ) {
-    const ticket = await this.app.ticket(role, user, id);
+  async ticket(@CurrentActor() actor: Actor, @Param('id') id: string) {
+    const ticket = await this.app.ticket(actor, id);
     if (!ticket)
       throw new BadRequestException('Ticket not found or not authorised');
     return ticket;
@@ -61,22 +67,43 @@ export class AppController {
 
   @Post('api/tickets/:id/reply')
   reply(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
+    @CurrentActor() actor: Actor,
     @Param('id') id: string,
     @Body() body: { text?: string; templateId?: string },
   ) {
-    return this.app.reply(role, user, id, body.text, body.templateId);
+    return this.app.reply(actor, id, body.text, body.templateId);
+  }
+
+  /** Send a file (multipart field "file", optional "caption") to the field agent. */
+  @Post('api/tickets/:id/media')
+  @UseInterceptors(upload)
+  sendMedia(
+    @CurrentActor() actor: Actor,
+    @Param('id') id: string,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body() body: { caption?: string },
+  ) {
+    return this.app.sendMedia(actor, id, file, body?.caption);
+  }
+
+  /** Download an attachment. Always served as a download, never rendered inline. */
+  @Get('api/attachments/:id')
+  async attachment(@CurrentActor() actor: Actor, @Param('id') id: string) {
+    const file = await this.app.attachment(actor, id);
+    return new StreamableFile(file.body, {
+      type: file.mimeType,
+      disposition: disposition(file.name),
+      length: file.body.length,
+    });
   }
 
   @Patch('api/tickets/:id/case')
   updateCase(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
+    @CurrentActor() actor: Actor,
     @Param('id') id: string,
     @Body() body: { queryType?: string; details?: Record<string, unknown> },
   ) {
-    return this.app.updateCase(role, user, id, body ?? {});
+    return this.app.updateCase(actor, id, body ?? {});
   }
 
   @Get('api/query-types')
@@ -91,58 +118,25 @@ export class AppController {
 
   @Post('api/tickets/:id/reassign')
   reassign(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
+    @CurrentActor() actor: Actor,
     @Param('id') id: string,
     @Body() body: { userId: string },
   ) {
-    return this.app.reassign(role, user, id, body.userId);
+    return this.app.reassign(actor, id, body.userId);
   }
 
   @Post('api/tickets/:id/status')
   status(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
+    @CurrentActor() actor: Actor,
     @Param('id') id: string,
     @Body() body: { status: string },
   ) {
-    return this.app.changeStatus(role, user, id, body.status);
-  }
-
-  @Post('api/simulator/inbound')
-  simulateInbound(
-    @Body()
-    body: {
-      phone: string;
-      text?: string;
-      mediaType?: string;
-      duplicate?: boolean;
-      providerId?: string;
-      replyId?: string;
-    },
-  ) {
-    if (
-      process.env.NODE_ENV === 'production' &&
-      process.env.SIMULATION_ENABLED !== 'true'
-    ) {
-      throw new BadRequestException('Simulator unavailable');
-    }
-    if (!body.phone || (!body.text && !body.mediaType && !body.replyId))
-      throw new BadRequestException('phone and message content are required');
-    return this.app.simulateInbound(body);
-  }
-
-  @Get('api/field-agents')
-  fieldAgents() {
-    return this.app.fieldAgents();
+    return this.app.changeStatus(actor, id, body.status);
   }
 
   @Get('api/reports')
-  reports(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
-  ) {
-    return this.app.reports(role, user);
+  reports(@CurrentActor() actor: Actor) {
+    return this.app.reports(actor);
   }
 
   @Get('api/reports.csv')
@@ -151,22 +145,15 @@ export class AppController {
     'Content-Disposition',
     'attachment; filename="gsm-casedesk-report.csv"',
   )
-  reportCsv(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
-  ) {
-    return this.app.reportCsv(role, user);
+  reportCsv(@CurrentActor() actor: Actor) {
+    return this.app.reportCsv(actor);
   }
 
   /** SOP Step 6 daily log for one day (YYYY-MM-DD, Lusaka time; defaults to today). */
   @Get('api/reports/daily-log.csv')
   @Header('Content-Type', 'text/csv; charset=utf-8')
   @Header('Content-Disposition', 'attachment; filename="gsm-daily-log.csv"')
-  async dailyLog(
-    @Headers('x-demo-role') role = 'SUPERVISOR',
-    @Headers('x-demo-user') user = 'demo-supervisor',
-    @Query('date') date?: string,
-  ) {
-    return (await this.app.dailyLogCsv(role, user, date)).csv;
+  async dailyLog(@CurrentActor() actor: Actor, @Query('date') date?: string) {
+    return (await this.app.dailyLogCsv(actor, date)).csv;
   }
 }
