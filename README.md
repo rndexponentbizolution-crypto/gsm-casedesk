@@ -9,34 +9,39 @@ GSM CaseDesk is a secure, human-operated WhatsApp case management platform for b
 - Docker Desktop or Docker Engine (recommended)
 
 ## Local development
-Run the services in Docker and the apps on your machine:
+There are no sample accounts or sample data. You create the first administrator yourself; everyone and everything else is added in CaseDesk.
+
 ```powershell
 npm install
-cp .env.example .env
+node infrastructure/generate-secrets.mjs           # creates .env with random secrets
 docker compose up -d postgres redis minio keycloak
 npm run db:migrate
-npm run db:seed
+npm run db:seed                                    # reference data only
+npm run staff -- bootstrap-admin --email you@example.com --name "Your Name"
 npm run dev
 ```
 
-The API, Prisma, the tests and the web app all read the root `.env`. PostgreSQL is published on host port **5433** (set `POSTGRES_HOST_PORT` to change it), so a locally installed PostgreSQL on 5432 doesn't get in the way.
+Run `bootstrap-admin` in your own terminal: it prints a one-time temporary password, once. At first sign-in you choose your own password and set up an authenticator app. It only works while nobody can manage staff, so it can't add a second administrator later.
+
+The API, Prisma, the tests and the web app all read the root `.env`. The tests use their own database (`casedesk_test`, created automatically) and never touch your data. PostgreSQL is published on host port **5433** (`POSTGRES_HOST_PORT`), Keycloak on **8080** (`KEYCLOAK_HOST_PORT`; change it and the two Keycloak URLs in `.env` if 8080 is taken).
 
 Or run everything in Docker (the API applies migrations on start):
 ```powershell
 docker compose up -d --build
-npm run db:seed   # once, from your machine, using the root .env
 ```
 
 - Web: http://localhost:3000
-- API: http://localhost:3001
-- Swagger: http://localhost:3001/docs
-- MinIO: http://localhost:9001
-- Keycloak: http://localhost:8080 (sign in as `chanda`, `martha` or `peter`, password `casedesk-dev`)
+- API: http://localhost:3001 (Swagger at `/docs`, development only)
+- Keycloak admin console: http://localhost:8080/admin (user `keycloak-admin`, password `KC_BOOTSTRAP_ADMIN_PASSWORD` in `.env`)
+- MinIO console: http://localhost:9001
 
-Sign-in uses Keycloak by default. To work without Keycloak, set `AUTH_MODE=demo` and `NEXT_PUBLIC_AUTH_MODE=demo` (development only). See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#sign-in-keycloak).
+Every port is bound to `127.0.0.1`: nothing is reachable from other machines.
+
+## Accounts and permissions
+Staff sign in through Keycloak only. An administrator manages accounts under **Staff & access**: creating someone makes their Keycloak sign-in and shows a one-time password to hand over; each person gets a role (Back office, Supervisor, Administrator) whose default permissions can then be granted or removed individually. Deactivating someone disables their sign-in at once. Field agents are added under **Field agents**. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#sign-in-and-permissions).
 
 ## WhatsApp
-CaseDesk runs a database-backed simulation by default (`SIMULATION_ENABLED=true`). Live delivery through Meta's WhatsApp Cloud API is built in and switches on with `SIMULATION_ENABLED=false` plus the Meta credentials; it is never enabled by default.
+Until live WhatsApp is connected (`SIMULATION_ENABLED=true`, the default), replies are recorded but not sent and no messages come in. Live delivery through Meta's WhatsApp Cloud API is built in and switches on with `SIMULATION_ENABLED=false` plus the Meta credentials.
 
 ## Going to production
 [docs/PRODUCTION.md](docs/PRODUCTION.md) is the go-live runbook: infrastructure, Keycloak, Meta setup, monitoring, and the approvals needed first.

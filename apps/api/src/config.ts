@@ -1,9 +1,8 @@
-import { authMode } from './auth';
-
 /**
- * `simulation` (default): messages never leave CaseDesk; the simulator endpoint is on.
- * `live`: outbound messages go to Meta's WhatsApp Cloud API through the outbox, the
- * signed Meta webhook is the only way in, and the simulator is off.
+ * `simulation` (default, SIMULATION_ENABLED unset or true): outbound messages are
+ * recorded but never leave CaseDesk, and nothing comes in (there is no simulator).
+ * `live`: outbound messages go to Meta's WhatsApp Cloud API through the outbox and
+ * the signed Meta webhook is the only way in.
  */
 export type MessagingMode = 'simulation' | 'live';
 
@@ -35,11 +34,15 @@ export function validateConfig(env: NodeJS.ProcessEnv = process.env): {
   const warnings: string[] = [];
   const production = env.NODE_ENV === 'production';
 
-  try {
-    authMode(env);
-  } catch (error) {
-    problems.push((error as Error).message);
-  }
+  // Demo sign-in has been removed: Keycloak is the only way in, whatever this says.
+  if (env.AUTH_MODE && env.AUTH_MODE.trim().toLowerCase() !== 'keycloak')
+    warnings.push(
+      `AUTH_MODE=${env.AUTH_MODE} is ignored: demo sign-in no longer exists and every request needs a Keycloak token. Remove the setting.`,
+    );
+  if (!env.KEYCLOAK_ADMIN_CLIENT_SECRET?.trim())
+    warnings.push(
+      'KEYCLOAK_ADMIN_CLIENT_SECRET is not set: staff accounts cannot be created or reset from CaseDesk.',
+    );
 
   const mode = messagingMode(env);
   if (mode === 'live') {

@@ -41,7 +41,7 @@ export class AppController {
     };
   }
 
-  /** The signed-in user, as CaseDesk knows them. */
+  /** The signed-in user, as CaseDesk knows them, with their effective permissions. */
   @Get('api/me')
   me(@CurrentActor() actor: Actor) {
     return actor;
@@ -49,17 +49,17 @@ export class AppController {
 
   @Get('api/dashboard')
   dashboard(@CurrentActor() actor: Actor) {
-    return this.app.dashboard(actor.role, actor.id);
+    return this.app.dashboard(actor);
   }
 
   @Get('api/tickets')
   tickets(@CurrentActor() actor: Actor, @Query('status') status?: string) {
-    return this.app.tickets(actor.role, actor.id, status);
+    return this.app.tickets(actor, status);
   }
 
   @Get('api/tickets/:id')
   async ticket(@CurrentActor() actor: Actor, @Param('id') id: string) {
-    const ticket = await this.app.ticket(actor.role, actor.id, id);
+    const ticket = await this.app.ticket(actor, id);
     if (!ticket)
       throw new BadRequestException('Ticket not found or not authorised');
     return ticket;
@@ -71,7 +71,7 @@ export class AppController {
     @Param('id') id: string,
     @Body() body: { text?: string; templateId?: string },
   ) {
-    return this.app.reply(actor.role, actor.id, id, body.text, body.templateId);
+    return this.app.reply(actor, id, body.text, body.templateId);
   }
 
   /** Send a file (multipart field "file", optional "caption") to the field agent. */
@@ -83,13 +83,13 @@ export class AppController {
     @UploadedFile() file: Express.Multer.File | undefined,
     @Body() body: { caption?: string },
   ) {
-    return this.app.sendMedia(actor.role, actor.id, id, file, body?.caption);
+    return this.app.sendMedia(actor, id, file, body?.caption);
   }
 
   /** Download an attachment. Always served as a download, never rendered inline. */
   @Get('api/attachments/:id')
   async attachment(@CurrentActor() actor: Actor, @Param('id') id: string) {
-    const file = await this.app.attachment(actor.role, actor.id, id);
+    const file = await this.app.attachment(actor, id);
     return new StreamableFile(file.body, {
       type: file.mimeType,
       disposition: disposition(file.name),
@@ -103,7 +103,7 @@ export class AppController {
     @Param('id') id: string,
     @Body() body: { queryType?: string; details?: Record<string, unknown> },
   ) {
-    return this.app.updateCase(actor.role, actor.id, id, body ?? {});
+    return this.app.updateCase(actor, id, body ?? {});
   }
 
   @Get('api/query-types')
@@ -122,7 +122,7 @@ export class AppController {
     @Param('id') id: string,
     @Body() body: { userId: string },
   ) {
-    return this.app.reassign(actor.role, actor.id, id, body.userId);
+    return this.app.reassign(actor, id, body.userId);
   }
 
   @Post('api/tickets/:id/status')
@@ -131,49 +131,12 @@ export class AppController {
     @Param('id') id: string,
     @Body() body: { status: string },
   ) {
-    return this.app.changeStatus(actor.role, actor.id, id, body.status);
-  }
-
-  /**
-   * Simulator: pretend a field agent sent a message. JSON, or multipart with a
-   * "file" to simulate an attachment. Off whenever live WhatsApp is enabled.
-   */
-  @Post('api/simulator/inbound')
-  @UseInterceptors(upload)
-  simulateInbound(
-    @Body()
-    body: {
-      phone: string;
-      text?: string;
-      mediaType?: string;
-      duplicate?: boolean | string;
-      providerId?: string;
-      replyId?: string;
-    },
-    @UploadedFile() file?: Express.Multer.File,
-  ) {
-    if (messagingMode() === 'live')
-      throw new BadRequestException('Simulator unavailable');
-    if (!body.phone || (!body.text && !body.mediaType && !body.replyId && !file))
-      throw new BadRequestException('phone and message content are required');
-    return this.app.simulateInbound(
-      {
-        ...body,
-        // Multipart fields arrive as strings.
-        duplicate: body.duplicate === true || body.duplicate === 'true',
-      },
-      file,
-    );
-  }
-
-  @Get('api/field-agents')
-  fieldAgents() {
-    return this.app.fieldAgents();
+    return this.app.changeStatus(actor, id, body.status);
   }
 
   @Get('api/reports')
   reports(@CurrentActor() actor: Actor) {
-    return this.app.reports(actor.role, actor.id);
+    return this.app.reports(actor);
   }
 
   @Get('api/reports.csv')
@@ -183,7 +146,7 @@ export class AppController {
     'attachment; filename="gsm-casedesk-report.csv"',
   )
   reportCsv(@CurrentActor() actor: Actor) {
-    return this.app.reportCsv(actor.role, actor.id);
+    return this.app.reportCsv(actor);
   }
 
   /** SOP Step 6 daily log for one day (YYYY-MM-DD, Lusaka time; defaults to today). */
@@ -191,6 +154,6 @@ export class AppController {
   @Header('Content-Type', 'text/csv; charset=utf-8')
   @Header('Content-Disposition', 'attachment; filename="gsm-daily-log.csv"')
   async dailyLog(@CurrentActor() actor: Actor, @Query('date') date?: string) {
-    return (await this.app.dailyLogCsv(actor.role, actor.id, date)).csv;
+    return (await this.app.dailyLogCsv(actor, date)).csv;
   }
 }

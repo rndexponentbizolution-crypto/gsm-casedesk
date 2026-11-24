@@ -27,17 +27,17 @@ const OUTBOUND_STATUS: Record<string, { label: string; tone: string; explain: st
 };
 
 export function OperationsView() {
-  const { isSupervisor } = useIdentity();
+  const { can } = useIdentity();
   const operations = useOperations();
   const action = useOperationAction();
   const now = useNow(30_000);
 
-  if (!isSupervisor)
+  if (!can("operations.manage"))
     return (
       <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         <PageHeader title="Operations" />
         <Card>
-          <EmptyState icon={<Lock size={20} />} title="Supervisor access required" />
+          <EmptyState icon={<Lock size={20} />} title="You don't have access to this page" description="Ask an administrator for the message operations permission." />
         </Card>
       </div>
     );

@@ -80,6 +80,7 @@
     ],
     "rootDir": "src",
     "maxWorkers": 1,
+    "globalSetup": "<rootDir>/test-db.jest.ts",
     "setupFiles": [
       "<rootDir>/load-env.jest.ts"
     ],

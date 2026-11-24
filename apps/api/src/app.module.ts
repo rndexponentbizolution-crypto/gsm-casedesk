@@ -1,7 +1,10 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { AdminController } from './admin.controller';
+import { AdminService } from './admin.service';
 import { AppController } from './app.controller';
+import { KeycloakAdmin } from './keycloak-admin';
 import { AppService } from './app.service';
 import { AuditService } from './audit.service';
 import { AuthGuard, TokenVerifier } from './auth';
@@ -22,9 +25,11 @@ import { MetaClient } from './whatsapp';
       },
     ]),
   ],
-  controllers: [AppController, MessagingController],
+  controllers: [AppController, AdminController, MessagingController],
   providers: [
+    AdminService,
     AppService,
+    KeycloakAdmin,
     AuditService,
     MessagingService,
     PrismaService,

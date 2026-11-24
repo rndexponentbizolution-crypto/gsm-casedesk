@@ -65,11 +65,10 @@ import {
   timeAgo,
   withBot,
 } from "@/lib/format";
-import { IDENTITIES, useIdentity } from "@/lib/identity";
+import { useIdentity } from "@/lib/identity";
 import { useNow } from "@/lib/use-now";
 import { EscalationCard, LogFields, PinResetWorkspace, SlaCard } from "./casework";
 import { EffectPill, ResponsePicker, suggestedResponseIds } from "./responses";
-import { useSimulator } from "./simulator";
 import { Avatar, Button, EmptyState, ErrorNotice, Skeleton, StatusBadge, inputClass } from "./ui";
 
 export type InboxView = "mine" | "all" | "escalated";
@@ -89,15 +88,15 @@ type Draft = { text: string; templateId?: string };
 
 function useNames() {
   const dashboard = useDashboard();
-  const { identity, mode } = useIdentity();
+  const { identity } = useIdentity();
   return useMemo(() => {
-    const names = new Map<string, string>(mode === "demo" ? IDENTITIES.map((item) => [item.id, item.name]) : []);
+    const names = new Map<string, string>();
     names.set(identity.id, identity.name);
     dashboard.data?.workload.forEach((item) => names.set(item.id, item.name));
     names.set("system", "System");
     names.set("bot", "GSM Bot");
     return names;
-  }, [dashboard.data, identity.id, identity.name, mode]);
+  }, [dashboard.data, identity.id, identity.name]);
 }
 
 /** Open work sorted by SLA urgency (soonest due first), then most recent activity. */
@@ -111,7 +110,6 @@ export function InboxPage({ view }: { view: InboxView }) {
   const tickets = useTickets();
   const queryTypes = useQueryTypes();
   const responses = useResponses();
-  const simulator = useSimulator();
   // Null until mounted (no clock reads during prerender); tickets only render after mount.
   const now = useNow(1_000) ?? 0;
   const [query, setQuery] = useState("");
@@ -258,7 +256,7 @@ export function InboxPage({ view }: { view: InboxView }) {
               <ErrorNotice error={tickets.error} onRetry={() => tickets.refetch()} />
             </div>
           ) : filtered.length === 0 ? (
-            <ListEmpty view={view} isSupervisor={isSupervisor} hasAny={scoped.length > 0} onSimulate={() => simulator.open()} />
+            <ListEmpty view={view} isSupervisor={isSupervisor} hasAny={scoped.length > 0} />
           ) : (
             <ul>
               {filtered.map((ticket) => (
@@ -295,14 +293,7 @@ export function InboxPage({ view }: { view: InboxView }) {
           <EmptyState
             icon={<InboxIcon size={20} />}
             title={scoped.length ? "Select a ticket" : "No conversations yet"}
-            description={scoped.length ? "Choose a conversation from the list to read and reply." : "Messages from Connect Store and Container agents will appear here."}
-            action={
-              !scoped.length && (
-                <Button variant="primary" onClick={() => simulator.open()}>
-                  <MessageSquarePlus size={16} aria-hidden /> Simulate a message
-                </Button>
-              )
-            }
+            description={scoped.length ? "Choose a conversation from the list to read and reply." : "Messages from registered field agents will appear here once WhatsApp is connected."}
           />
         </div>
       )}
@@ -326,7 +317,7 @@ function ListSkeleton() {
   );
 }
 
-function ListEmpty({ view, isSupervisor, hasAny, onSimulate }: { view: InboxView; isSupervisor: boolean; hasAny: boolean; onSimulate: () => void }) {
+function ListEmpty({ view, isSupervisor, hasAny }: { view: InboxView; isSupervisor: boolean; hasAny: boolean }) {
   if (hasAny) return <EmptyState title="Nothing matches" description="Try a different filter or search term." />;
   if (view === "mine" && isSupervisor)
     return (
@@ -347,11 +338,6 @@ function ListEmpty({ view, isSupervisor, hasAny, onSimulate }: { view: InboxView
       icon={<InboxIcon size={20} />}
       title="Inbox zero"
       description="New PIN resets are routed here automatically after the bot collects the details."
-      action={
-        <Button size="sm" onClick={onSimulate}>
-          <MessageSquarePlus size={14} aria-hidden /> Simulate a message
-        </Button>
-      }
     />
   );
 }
@@ -461,7 +447,7 @@ function Conversation({
   showDetails: boolean;
   onToggleDetails: () => void;
 }) {
-  const { identity, isSupervisor } = useIdentity();
+  const { identity, isSupervisor, can } = useIdentity();
   const names = useNames();
   const reply = useReply(ticket.id);
   const sendMedia = useSendMedia(ticket.id);
@@ -471,7 +457,7 @@ function Conversation({
   const textRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const window24 = serviceWindow(ticket, now);
-  const canAct = isSupervisor || ticket.assignedUserId === identity.id;
+  const canAct = can("tickets.reply") && (isSupervisor || ticket.assignedUserId === identity.id);
   const closed = !isOpen(ticket);
   const bot = withBot(ticket);
   const responseById = useMemo(() => new Map(responses.map((response) => [response.id, response])), [responses]);
@@ -849,7 +835,7 @@ function DeliveryState({ state }: { state: string }) {
 /* ---------------- details ---------------- */
 
 function Details({ ticket, now, onClose, onUseResponse }: { ticket: Ticket; now: number; onClose: () => void; onUseResponse: (responseId: string) => void }) {
-  const { identity, isSupervisor } = useIdentity();
+  const { identity, isSupervisor, can } = useIdentity();
   const dashboard = useDashboard();
   const tickets = useTickets();
   const queryTypes = useQueryTypes();
@@ -857,7 +843,7 @@ function Details({ ticket, now, onClose, onUseResponse }: { ticket: Ticket; now:
   const changeStatus = useChangeStatus(ticket.id);
   const reassign = useReassign(ticket.id);
   const updateCase = useUpdateCase(ticket.id);
-  const canAct = isSupervisor || ticket.assignedUserId === identity.id;
+  const canAct = can("tickets.reply") && (isSupervisor || ticket.assignedUserId === identity.id);
   const transitions = STATUS_TRANSITIONS[ticket.status];
   const agentTickets = (tickets.data ?? []).filter((item) => item.agent.phone === ticket.agent.phone);
   const firstResponse = ticket.firstResponseAt ? new Date(ticket.firstResponseAt).getTime() - new Date(ticket.createdAt).getTime() : null;
@@ -943,7 +929,7 @@ function Details({ ticket, now, onClose, onUseResponse }: { ticket: Ticket; now:
             {ticket.assignedUserId ? <Avatar name={ticket.assignee} size={28} /> : <span className="h-7 w-7 rounded-full border border-dashed border-slate-300" />}
             <span className="text-sm text-slate-900">{ticket.assignee}</span>
           </div>
-          {isSupervisor && isOpen(ticket) && (
+          {can("tickets.reassign") && isOpen(ticket) && (
             <div className="mt-3">
               <select
                 aria-label="Reassign ticket"

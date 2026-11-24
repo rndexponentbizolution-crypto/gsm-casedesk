@@ -1,36 +1,37 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { LogOut, ShieldAlert } from "lucide-react";
-import { AUTH_MODE, configureSession, startKeycloak } from "./session";
+import { configureSession, startKeycloak } from "./session";
 
 export type Role = "BACK_OFFICE" | "SUPERVISOR" | "ADMINISTRATOR";
-export type Identity = { id: string; name: string; role: Role; title: string };
 
-const TITLES: Record<Role, string> = { BACK_OFFICE: "Back office", SUPERVISOR: "Supervisor", ADMINISTRATOR: "Administrator" };
+/** Mirrors the API's permission keys (apps/api/src/permissions.ts). */
+export type Permission =
+  | "tickets.reply"
+  | "tickets.view_all"
+  | "tickets.reassign"
+  | "reports.view"
+  | "reports.export"
+  | "operations.manage"
+  | "field_agents.manage"
+  | "audit.verify"
+  | "staff.manage";
 
-// Demo personas (AUTH_MODE=demo only). They match the seeded users.
-export const IDENTITIES: Identity[] = [
-  { id: "demo-supervisor", name: "Chanda Mwansa", role: "SUPERVISOR", title: "Supervisor" },
-  { id: "demo-agent-1", name: "Martha Banda", role: "BACK_OFFICE", title: "Back office" },
-  { id: "demo-agent-2", name: "Peter Mulenga", role: "BACK_OFFICE", title: "Back office" },
-];
+export type Identity = { id: string; name: string; email: string; role: Role; title: string; permissions: Permission[] };
+
+export const ROLE_TITLE: Record<Role, string> = { BACK_OFFICE: "Back office", SUPERVISOR: "Supervisor", ADMINISTRATOR: "Administrator" };
 
 type IdentityContextValue = {
   identity: Identity;
+  /** True when the signed-in person holds the permission. The API enforces the same rules. */
+  can: (permission: Permission) => boolean;
+  /** Sees the whole desk, not only their own tickets. */
   isSupervisor: boolean;
-  mode: "keycloak" | "demo";
-  /** Demo mode only: act as another persona. */
-  setIdentity?: (id: string) => void;
-  /** Keycloak mode only: end the Keycloak session. */
-  signOut?: () => void;
+  signOut: () => void;
 };
 
 const IdentityContext = createContext<IdentityContextValue | null>(null);
-
-export function IdentityProvider({ children }: { children: ReactNode }) {
-  return AUTH_MODE === "demo" ? <DemoIdentityProvider>{children}</DemoIdentityProvider> : <KeycloakIdentityProvider>{children}</KeycloakIdentityProvider>;
-}
 
 export function useIdentity() {
   const value = useContext(IdentityContext);
@@ -38,15 +39,13 @@ export function useIdentity() {
   return value;
 }
 
-// ---------- Keycloak ----------
-
 type SignInState =
   | { kind: "loading" }
   | { kind: "ready"; identity: Identity; signOut: () => void }
   | { kind: "no-account"; signOut: () => void }
   | { kind: "error"; message: string };
 
-function KeycloakIdentityProvider({ children }: { children: ReactNode }) {
+export function IdentityProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<SignInState>({ kind: "loading" });
 
   useEffect(() => {
@@ -64,8 +63,8 @@ function KeycloakIdentityProvider({ children }: { children: ReactNode }) {
       // Imported here to avoid a module cycle (api.ts reads the identity context).
       const { apiFetch, ApiError } = await import("./api");
       try {
-        const me = await apiFetch<{ id: string; name: string; role: Role }>("/api/me");
-        if (!cancelled) setState({ kind: "ready", identity: { ...me, title: TITLES[me.role] ?? me.role }, signOut });
+        const me = await apiFetch<Omit<Identity, "title">>("/api/me");
+        if (!cancelled) setState({ kind: "ready", identity: { ...me, title: ROLE_TITLE[me.role] ?? me.role }, signOut });
       } catch (error) {
         if (cancelled) return;
         if (error instanceof ApiError && error.status === 403) setState({ kind: "no-account", signOut });
@@ -79,13 +78,12 @@ function KeycloakIdentityProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const value = useMemo<IdentityContextValue | null>(
-    () =>
-      state.kind === "ready"
-        ? { identity: state.identity, isSupervisor: state.identity.role !== "BACK_OFFICE", mode: "keycloak", signOut: state.signOut }
-        : null,
-    [state],
-  );
+  const value = useMemo<IdentityContextValue | null>(() => {
+    if (state.kind !== "ready") return null;
+    const granted = new Set(state.identity.permissions);
+    const can = (permission: Permission) => granted.has(permission);
+    return { identity: state.identity, can, isSupervisor: can("tickets.view_all"), signOut: state.signOut };
+  }, [state]);
 
   if (state.kind === "loading") return <SignInScreen title="Signing you in…" />;
   if (state.kind === "no-account")
@@ -93,7 +91,7 @@ function KeycloakIdentityProvider({ children }: { children: ReactNode }) {
       <SignInScreen
         icon={<ShieldAlert size={22} className="text-amber-600" aria-hidden />}
         title="No CaseDesk account"
-        body="You signed in successfully, but your account isn't set up in CaseDesk yet, or it has been deactivated. Ask a supervisor or administrator to add you."
+        body="You signed in successfully, but your account isn't set up in CaseDesk yet, or it has been deactivated. Ask an administrator."
         action={{ label: "Sign out", onClick: state.signOut }}
       />
     );
@@ -118,49 +116,4 @@ function SignInScreen({ icon, title, body, action }: { icon?: ReactNode; title: 
       </div>
     </main>
   );
-}
-
-// ---------- Demo ----------
-
-const STORAGE_KEY = "casedesk.identity";
-const listeners = new Set<() => void>();
-
-function readStored(): string {
-  try {
-    return window.localStorage.getItem(STORAGE_KEY) ?? IDENTITIES[0].id;
-  } catch {
-    return IDENTITIES[0].id;
-  }
-}
-
-function subscribe(listener: () => void) {
-  listeners.add(listener);
-  const onStorage = (event: StorageEvent) => event.key === STORAGE_KEY && listener();
-  window.addEventListener("storage", onStorage);
-  return () => {
-    listeners.delete(listener);
-    window.removeEventListener("storage", onStorage);
-  };
-}
-
-if (AUTH_MODE === "demo") configureSession(async () => ({ "x-demo-user": readStored() }), null);
-
-function DemoIdentityProvider({ children }: { children: ReactNode }) {
-  const id = useSyncExternalStore(subscribe, readStored, () => IDENTITIES[0].id);
-  const identity = IDENTITIES.find((item) => item.id === id) ?? IDENTITIES[0];
-
-  const setIdentity = useCallback((next: string) => {
-    try {
-      window.localStorage.setItem(STORAGE_KEY, next);
-    } catch {
-      /* storage unavailable: identity resets on reload */
-    }
-    listeners.forEach((listener) => listener());
-  }, []);
-
-  const value = useMemo<IdentityContextValue>(
-    () => ({ identity, setIdentity, isSupervisor: identity.role !== "BACK_OFFICE", mode: "demo" }),
-    [identity, setIdentity],
-  );
-  return <IdentityContext.Provider value={value}>{children}</IdentityContext.Provider>;
 }

@@ -2,13 +2,7 @@
 
 import type Keycloak from "keycloak-js";
 
-/**
- * `keycloak` (default): staff sign in through Keycloak and every API call carries a
- * bearer token. `demo`: a persona picker sends `x-demo-user`; the API accepts that only
- * when it also runs with AUTH_MODE=demo outside production.
- */
-export const AUTH_MODE: "keycloak" | "demo" = process.env.NEXT_PUBLIC_AUTH_MODE === "demo" ? "demo" : "keycloak";
-
+/** Staff sign in through Keycloak; every API call carries a bearer token. There is no other way in. */
 export const KEYCLOAK_CONFIG = {
   url: (process.env.NEXT_PUBLIC_KEYCLOAK_URL ?? "http://localhost:8080").replace(/\/+$/, ""),
   realm: process.env.NEXT_PUBLIC_KEYCLOAK_REALM ?? "gsm-casedesk",

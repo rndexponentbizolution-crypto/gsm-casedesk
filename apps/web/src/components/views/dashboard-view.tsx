@@ -18,7 +18,7 @@ function greeting(hour: number) {
 }
 
 export function DashboardView() {
-  const { identity, isSupervisor } = useIdentity();
+  const { identity, isSupervisor, can } = useIdentity();
   const tickets = useTickets();
   const dashboard = useDashboard();
   const reports = useReports();
@@ -85,7 +85,7 @@ export function DashboardView() {
         </div>
       )}
 
-      {isSupervisor && dashboard.data && dashboard.data.failedOutbound + dashboard.data.stuckInbound > 0 && (
+      {can("operations.manage") && dashboard.data && dashboard.data.failedOutbound + dashboard.data.stuckInbound > 0 && (
         <Link
           href="/operations"
           className="mb-6 flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 hover:bg-red-100"
@@ -196,7 +196,7 @@ export function DashboardView() {
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-3">
-        {isSupervisor && (
+        {can("reports.view") && (
           <Card className="lg:col-span-2" title="Messages, last 14 days">
             {reports.isPending || !days.length ? (
               <Skeleton className="h-52" />
@@ -214,7 +214,7 @@ export function DashboardView() {
           </Card>
         )}
 
-        <Card title="Team workload" className={isSupervisor ? "" : "lg:col-span-3"}>
+        <Card title="Team workload" className={can("reports.view") ? "" : "lg:col-span-3"}>
           {dashboard.isPending ? (
             <Skeleton className="h-32" />
           ) : (

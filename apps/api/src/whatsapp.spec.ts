@@ -198,8 +198,8 @@ describe('validateConfig', () => {
     expect(live.mode).toBe('live');
     expect(live.warnings.join()).toMatch(/CLAMAV_HOST/);
   });
-  it('refuses demo sign-in and development storage keys in production', () => {
-    expect(() => validateConfig({ ...base, AUTH_MODE: 'demo' })).toThrow(/AUTH_MODE=demo/);
+  it('warns that AUTH_MODE=demo does nothing, and refuses development storage keys in production', () => {
+    expect(validateConfig({ ...base, AUTH_MODE: 'demo' }).warnings.join()).toMatch(/AUTH_MODE=demo is ignored/);
     expect(() => validateConfig({ ...base, S3_SECRET_KEY: 'change-me' })).toThrow(/development defaults/);
   });
   it('warns when CORS has no production origin', () => {

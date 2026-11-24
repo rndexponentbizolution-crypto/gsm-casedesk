@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useIdentity } from "./identity";
+import { useIdentity, type Permission, type Role } from "./identity";
 import { authHeaders, handleUnauthorized } from "./session";
 
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001").replace(/\/$/, "");
@@ -254,11 +254,11 @@ export function useDashboard() {
 }
 
 export function useReports() {
-  const { identity } = useIdentity();
+  const { identity, can } = useIdentity();
   return useQuery({
     queryKey: ["reports", identity.id],
     queryFn: () => apiFetch<Report>("/api/reports"),
-    enabled: identity.role !== "BACK_OFFICE",
+    enabled: can("reports.view"),
     refetchInterval: 60_000,
   });
 }
@@ -288,11 +288,11 @@ export function useQueryTypes() {
 }
 
 export function useOperations() {
-  const { identity } = useIdentity();
+  const { identity, can } = useIdentity();
   return useQuery({
     queryKey: ["operations", identity.id],
     queryFn: () => apiFetch<Operations>("/api/operations"),
-    enabled: identity.role !== "BACK_OFFICE",
+    enabled: can("operations.manage"),
     refetchInterval: 15_000,
   });
 }
@@ -403,24 +403,87 @@ export function useOperationAction() {
   });
 }
 
-export type InboundInput = { phone: string; text?: string; replyId?: string; mediaType?: string; file?: File };
+// ---------- administration ----------
 
-export function useSimulateInbound() {
-  const afterWrite = useAfterWrite();
+export type StaffMember = {
+  id: string;
+  name: string;
+  email: string;
+  role: Role;
+  team: string | null;
+  active: boolean;
+  availability: boolean;
+  capacity: number;
+  grantedPermissions: Permission[];
+  revokedPermissions: Permission[];
+  permissions: Permission[];
+  createdAt: string;
+};
+
+export type PermissionCatalog = {
+  permissions: Array<{ key: Permission; description: string }>;
+  roles: Array<{ key: Role; defaults: Permission[] }>;
+  /** False when the API has no Keycloak account-management secret. */
+  accountManagement: boolean;
+};
+
+export type StaffInput = Partial<Pick<StaffMember, "name" | "email" | "role" | "grantedPermissions" | "revokedPermissions" | "active" | "availability" | "capacity">>;
+
+export function useStaff() {
+  const { can } = useIdentity();
+  return useQuery({ queryKey: ["staff"], queryFn: () => apiFetch<StaffMember[]>("/api/staff"), enabled: can("staff.manage") });
+}
+
+export function usePermissionCatalog() {
+  const { can } = useIdentity();
+  return useQuery({
+    queryKey: ["permission-catalog"],
+    queryFn: () => apiFetch<PermissionCatalog>("/api/staff/permissions"),
+    enabled: can("staff.manage"),
+    staleTime: Infinity,
+  });
+}
+
+function useInvalidate(...keys: string[]) {
+  const client = useQueryClient();
+  return () => {
+    for (const key of keys) void client.invalidateQueries({ queryKey: [key] });
+  };
+}
+
+/** Creates the account; the result holds a one-time temporary password to hand over. */
+export function useCreateStaff() {
+  const invalidate = useInvalidate("staff", "dashboard");
   return useMutation({
-    mutationFn: ({ file, ...input }: InboundInput) => {
-      let body: string | FormData = JSON.stringify(input);
-      if (file) {
-        body = new FormData();
-        for (const [key, value] of Object.entries(input)) if (value) body.append(key, value);
-        body.append("file", file);
-      }
-      return apiFetch<{ ticketId: string | null; reference: string | null; duplicate: boolean; botState?: BotState }>("/api/simulator/inbound", {
-        method: "POST",
-        body,
-      });
-    },
-    onSuccess: () => afterWrite(),
+    mutationFn: (input: StaffInput) =>
+      apiFetch<{ staff: StaffMember; temporaryPassword: string }>("/api/staff", { method: "POST", body: JSON.stringify(input) }),
+    onSuccess: invalidate,
+  });
+}
+
+export function useUpdateStaff() {
+  const invalidate = useInvalidate("staff", "dashboard", "tickets");
+  return useMutation({
+    mutationFn: ({ id, ...input }: StaffInput & { id: string }) =>
+      apiFetch<{ staff: StaffMember; openTicketsToReassign: number }>(`/api/staff/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
+    onSuccess: invalidate,
+  });
+}
+
+export function useResetPassword() {
+  return useMutation({
+    mutationFn: (id: string) => apiFetch<{ temporaryPassword: string }>(`/api/staff/${id}/reset-password`, { method: "POST" }),
+  });
+}
+
+export type FieldAgentInput = Partial<Pick<FieldAgent, "name" | "phone" | "employeeId" | "region" | "storeName" | "shopType" | "active">>;
+
+export function useSaveFieldAgent() {
+  const invalidate = useInvalidate("field-agents");
+  return useMutation({
+    mutationFn: ({ id, ...input }: FieldAgentInput & { id?: string }) =>
+      apiFetch<FieldAgent>(id ? `/api/field-agents/${id}` : "/api/field-agents", { method: id ? "PATCH" : "POST", body: JSON.stringify(input) }),
+    onSuccess: invalidate,
   });
 }
 

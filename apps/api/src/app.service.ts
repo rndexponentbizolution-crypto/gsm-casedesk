@@ -20,6 +20,12 @@ import {
   MENUS,
 } from './bot';
 import { messagingMode } from './config';
+import {
+  type Access,
+  can,
+  effectivePermissions,
+  requirePermission,
+} from './permissions';
 import { PrismaService } from './prisma.service';
 import {
   CONVERSATION_RESET_MS,
@@ -209,9 +215,6 @@ export const mediaKind = (mimeType: string) =>
   SENDABLE_MEDIA[mimeType] ??
   (/^(image|audio|video)\//.exec(mimeType)?.[1] || 'document');
 
-const isPrivileged = (role: string) =>
-  role === 'SUPERVISOR' || role === 'ADMINISTRATOR';
-
 const asDetails = (value: Prisma.JsonValue | null): CaseDetails =>
   value && typeof value === 'object' && !Array.isArray(value)
     ? (value as CaseDetails)
@@ -337,26 +340,28 @@ export class AppService {
     };
   }
 
-  private visibilityWhere(role: string, user: string): Prisma.TicketWhereInput {
-    if (isPrivileged(role)) return {};
+  private visibilityWhere(actor: Access): Prisma.TicketWhereInput {
+    if (can(actor, 'tickets.view_all')) return {};
+    const user = actor.id;
     return {
       assignments: { some: { active: true, user: { keycloakId: user } } },
     };
   }
 
-  private authorised(role: string, user: string, ticket: Ticket) {
-    return isPrivileged(role) || ticket.assignedUserId === user;
+  private authorised(actor: Access, ticket: Ticket) {
+    return can(actor, 'tickets.view_all') || ticket.assignedUserId === actor.id;
   }
 
   private async loadTicket(id: string, db: Tx | PrismaService = this.prisma) {
     return db.ticket.findUnique({ where: { id }, include: ticketInclude });
   }
 
-  private async loadAuthorised(role: string, user: string, id: string) {
+  private async loadAuthorised(actor: Access, id: string) {
+    const user = actor.id;
     const record = await this.loadTicket(id);
     if (!record) throw new NotFoundException('Ticket not found');
     const ticket = this.toDto(record);
-    if (!this.authorised(role, user, ticket)) {
+    if (!this.authorised(actor, ticket)) {
       await this.denied(user, id);
       throw new ForbiddenException('Not authorised');
     }
@@ -370,13 +375,12 @@ export class AppService {
     });
   }
 
-  private async visible(
-    role: string,
-    user: string,
+  private async visible(actor: Access,
     extra: Prisma.TicketWhereInput = {},
   ) {
+    const user = actor.id;
     const records = await this.prisma.ticket.findMany({
-      where: { AND: [this.visibilityWhere(role, user), extra] },
+      where: { AND: [this.visibilityWhere(actor), extra] },
       include: ticketInclude,
       orderBy: { lastMessageAt: 'desc' },
     });
@@ -454,12 +458,12 @@ export class AppService {
 
   // ---------- queries ----------
 
-  async dashboard(role: string, user: string) {
+  async dashboard(actor: Access) {
     const [visible, staff, stuckInbound] = await Promise.all([
-      this.visible(role, user),
+      this.visible(actor),
       this.backOfficeUsers(),
-      // Webhook events are not tied to a ticket yet, so only supervisors see them.
-      isPrivileged(role)
+      // Webhook events are not tied to a ticket yet, so only operations staff see them.
+      can(actor, 'operations.manage')
         ? this.prisma.inboundWebhookEvent.count({
             where: {
               OR: [
@@ -512,15 +516,11 @@ export class AppService {
     };
   }
 
-  async tickets(role: string, user: string, status?: string) {
+  async tickets(actor: Access, status?: string) {
     if (status && !(status in TRANSITIONS))
       throw new BadRequestException(`Unknown status: ${status}`);
     const [visible, staff] = await Promise.all([
-      this.visible(
-        role,
-        user,
-        status ? { status: status as TicketStatus } : {},
-      ),
+      this.visible(actor, status ? { status: status as TicketStatus } : {}),
       this.prisma.user.findMany({ select: { keycloakId: true, name: true } }),
     ]);
     const names = new Map(staff.map((item) => [item.keycloakId, item.name]));
@@ -532,11 +532,12 @@ export class AppService {
     }));
   }
 
-  async ticket(role: string, user: string, id: string): Promise<Ticket | null> {
+  async ticket(actor: Access, id: string): Promise<Ticket | null> {
+    const user = actor.id;
     const record = await this.loadTicket(id);
     if (!record) return null;
     const ticket = this.toDto(record);
-    if (this.authorised(role, user, ticket)) return ticket;
+    if (this.authorised(actor, ticket)) return ticket;
     await this.denied(user, id);
     return null;
   }
@@ -906,30 +907,6 @@ export class AppService {
     // WITH_AGENT: a person is handling it; the bot stays quiet.
   }
 
-  /** Simulator only. An optional uploaded file is stored like a real inbound attachment. */
-  async simulateInbound(
-    body: InboundInput,
-    file?: { buffer: Buffer; originalname: string; mimetype: string },
-  ) {
-    if (this.live)
-      throw new BadRequestException(
-        'The simulator is off while live WhatsApp is enabled',
-      );
-    if (file) {
-      const stored = await this.storeFile(
-        file.buffer,
-        file.originalname,
-        file.mimetype,
-      );
-      body = {
-        ...body,
-        media: stored,
-        mediaType: body.mediaType ?? mediaKind(file.mimetype),
-      };
-    }
-    return this.handleInbound(body, true);
-  }
-
   /**
    * Scans a file and writes it to storage under a fresh key. Infected files are
    * not stored at all: the result has storageKey null and scanStatus INFECTED.
@@ -1260,14 +1237,14 @@ export class AppService {
     return status;
   }
 
-  async reply(
-    role: string,
-    user: string,
+  async reply(actor: Access,
     id: string,
     text?: string,
     templateId?: string,
   ) {
-    const ticket = await this.loadAuthorised(role, user, id);
+    const user = actor.id;
+    requirePermission(actor, 'tickets.reply');
+    const ticket = await this.loadAuthorised(actor, id);
     if (!text?.trim()) throw new BadRequestException('Reply text is required');
     if (CLOSED_STATES.includes(ticket.status))
       throw new BadRequestException('Reopen the case before replying');
@@ -1330,14 +1307,14 @@ export class AppService {
   }
 
   /** Staff send a file (with an optional caption) to the field agent. */
-  async sendMedia(
-    role: string,
-    user: string,
+  async sendMedia(actor: Access,
     id: string,
     file: { buffer: Buffer; originalname: string; mimetype: string } | undefined,
     caption?: string,
   ) {
-    const ticket = await this.loadAuthorised(role, user, id);
+    const user = actor.id;
+    requirePermission(actor, 'tickets.reply');
+    const ticket = await this.loadAuthorised(actor, id);
     if (!file?.buffer?.length) throw new BadRequestException('A file is required');
     if (CLOSED_STATES.includes(ticket.status))
       throw new BadRequestException('Reopen the case before replying');
@@ -1413,13 +1390,14 @@ export class AppService {
   }
 
   /** An attachment's bytes, for someone allowed to see its ticket. Audited. */
-  async attachment(role: string, user: string, attachmentId: string) {
+  async attachment(actor: Access, attachmentId: string) {
+    const user = actor.id;
     const file = await this.prisma.attachment.findUnique({
       where: { id: attachmentId },
       include: { message: { select: { ticketId: true } } },
     });
     if (!file) throw new NotFoundException('Attachment not found');
-    await this.loadAuthorised(role, user, file.message.ticketId);
+    await this.loadAuthorised(actor, file.message.ticketId);
     if (!file.storageKey || !SERVABLE.includes(file.scanStatus as ScanStatus))
       throw new BadRequestException(
         file.scanStatus === 'INFECTED'
@@ -1436,17 +1414,24 @@ export class AppService {
     return { body, name: file.name, mimeType: file.mimeType };
   }
 
-  async reassign(role: string, user: string, id: string, userId: string) {
-    if (!isPrivileged(role))
-      throw new ForbiddenException('Supervisor authorisation required');
+  async reassign(actor: Access, id: string, userId: string) {
+    const user = actor.id;
+    requirePermission(actor, 'tickets.reassign');
     const ticket = await this.prisma.ticket.findUnique({ where: { id } });
     if (!ticket) throw new NotFoundException('Ticket not found');
     const target = await this.prisma.user.findFirst({
-      where: { keycloakId: userId, role: 'BACK_OFFICE', active: true },
+      where: { keycloakId: userId, active: true },
     });
-    if (!target)
+    if (
+      !target ||
+      !effectivePermissions(
+        target.role,
+        target.grantedPermissions,
+        target.revokedPermissions,
+      ).includes('tickets.reply')
+    )
       throw new BadRequestException(
-        'Reassignment target is not an active back-office employee',
+        'Reassignment target is not an active staff member who can work tickets',
       );
     if (!target.availability)
       throw new BadRequestException('Reassignment target is unavailable');
@@ -1482,8 +1467,10 @@ export class AppService {
     return this.toDto((await this.loadTicket(id))!);
   }
 
-  async changeStatus(role: string, user: string, id: string, status: string) {
-    const ticket = await this.loadAuthorised(role, user, id);
+  async changeStatus(actor: Access, id: string, status: string) {
+    const user = actor.id;
+    requirePermission(actor, 'tickets.reply');
+    const ticket = await this.loadAuthorised(actor, id);
     if (!(status in TRANSITIONS))
       throw new BadRequestException(`Unknown status: ${status}`);
     const to = status as TicketStatus;
@@ -1521,13 +1508,13 @@ export class AppService {
   }
 
   /** Update casework: query type, log fields, validation/verification checklists. */
-  async updateCase(
-    role: string,
-    user: string,
+  async updateCase(actor: Access,
     id: string,
     patch: { queryType?: string; details?: Record<string, unknown> },
   ) {
-    const ticket = await this.loadAuthorised(role, user, id);
+    const user = actor.id;
+    requirePermission(actor, 'tickets.reply');
+    const ticket = await this.loadAuthorised(actor, id);
     if (patch.queryType !== undefined && !isQueryType(patch.queryType))
       throw new BadRequestException(`Unknown query type: ${patch.queryType}`);
     const textFields = [
@@ -1597,11 +1584,10 @@ export class AppService {
 
   // ---------- reporting ----------
 
-  async reports(role: string, user: string) {
-    if (!isPrivileged(role))
-      throw new ForbiddenException('Supervisor authorisation required');
+  async reports(actor: Access) {
+    requirePermission(actor, 'reports.view');
     const [visible, staff] = await Promise.all([
-      this.visible(role, user),
+      this.visible(actor),
       this.backOfficeUsers(),
     ]);
     const now = Date.now();
@@ -1707,8 +1693,10 @@ export class AppService {
     };
   }
 
-  async reportCsv(role: string, user: string) {
-    const report = await this.reports(role, user);
+  async reportCsv(actor: Access) {
+    const user = actor.id;
+    requirePermission(actor, 'reports.export');
+    const report = await this.reports(actor);
     const rows = [
       ['metric', 'value'],
       ...Object.entries(report)
@@ -1731,9 +1719,9 @@ export class AppService {
   }
 
   /** The SOP's "GSM Back Office daily log" (Step 6), for one Lusaka calendar day. */
-  async dailyLogCsv(role: string, user: string, date?: string) {
-    if (!isPrivileged(role))
-      throw new ForbiddenException('Supervisor authorisation required');
+  async dailyLogCsv(actor: Access, date?: string) {
+    const user = actor.id;
+    requirePermission(actor, 'reports.export');
     const day =
       date && /^\d{4}-\d{2}-\d{2}$/.test(date)
         ? date
@@ -1742,7 +1730,7 @@ export class AppService {
       new Date(`${day}T00:00:00.000Z`).getTime() - LUSAKA_OFFSET_MS,
     );
     const end = new Date(start.getTime() + 24 * 3600_000);
-    const visible = await this.visible(role, user, {
+    const visible = await this.visible(actor, {
       createdAt: { gte: start, lt: end },
       queryType: { not: null },
     });

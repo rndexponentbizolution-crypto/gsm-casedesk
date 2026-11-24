@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -8,6 +7,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { MessageState, Prisma } from '@prisma/client';
+import { type Access, requirePermission } from './permissions';
 import { AppService, mediaKind, STUCK_AFTER_MS } from './app.service';
 import { AuditService } from './audit.service';
 import { messagingMode } from './config';
@@ -42,9 +42,6 @@ const STATE_RANK: Record<MessageState, number> = {
   READ: 3,
   FAILED: 4,
 };
-
-const isPrivileged = (role: string) =>
-  role === 'SUPERVISOR' || role === 'ADMINISTRATOR';
 
 type OutboxRow = {
   id: string;
@@ -364,14 +361,9 @@ export class MessagingService implements OnModuleInit, OnModuleDestroy {
 
   // ---------- operations (supervisors) ----------
 
-  private requireSupervisor(role: string) {
-    if (!isPrivileged(role))
-      throw new ForbiddenException('Supervisor authorisation required');
-  }
-
   /** Failed, ambiguous, retrying and stuck work, newest first. */
-  async operations(role: string) {
-    this.requireSupervisor(role);
+  async operations(actor: Access) {
+    requirePermission(actor, 'operations.manage');
     const stuckBefore = new Date(Date.now() - STUCK_AFTER_MS);
     const [outbound, inbound] = await Promise.all([
       this.prisma.outboundMessageOutbox.findMany({
@@ -437,8 +429,9 @@ export class MessagingService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async retryOutbound(role: string, user: string, id: string) {
-    this.requireSupervisor(role);
+  async retryOutbound(actor: Access, id: string) {
+    requirePermission(actor, 'operations.manage');
+    const user = actor.id;
     const row = await this.prisma.outboundMessageOutbox.findUnique({ where: { id } });
     if (!row) throw new NotFoundException('Outbound message not found');
     if (!['FAILED', 'AMBIGUOUS'].includes(row.status))
@@ -462,8 +455,9 @@ export class MessagingService implements OnModuleInit, OnModuleDestroy {
     return { id, status: 'PENDING' };
   }
 
-  async dismissOutbound(role: string, user: string, id: string) {
-    this.requireSupervisor(role);
+  async dismissOutbound(actor: Access, id: string) {
+    requirePermission(actor, 'operations.manage');
+    const user = actor.id;
     const row = await this.prisma.outboundMessageOutbox.findUnique({ where: { id } });
     if (!row) throw new NotFoundException('Outbound message not found');
     if (!['FAILED', 'AMBIGUOUS'].includes(row.status))
@@ -480,8 +474,9 @@ export class MessagingService implements OnModuleInit, OnModuleDestroy {
     return { id, status: 'DISMISSED' };
   }
 
-  async retryInbound(role: string, user: string, id: string) {
-    this.requireSupervisor(role);
+  async retryInbound(actor: Access, id: string) {
+    requirePermission(actor, 'operations.manage');
+    const user = actor.id;
     const row = await this.prisma.inboundWebhookEvent.findUnique({ where: { id } });
     if (!row) throw new NotFoundException('Inbound event not found');
     if (row.status === 'PROCESSED')

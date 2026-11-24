@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuditService } from './audit.service';
-import type { Actor } from './auth';
+import type { InboundInput } from './app.service';
 import { PrismaService } from './prisma.service';
 import { ScannerService } from './scanner';
 import { StorageService } from './storage';
@@ -11,35 +11,21 @@ import { StorageService } from './storage';
 delete process.env.S3_BUCKET;
 delete process.env.CLAMAV_HOST;
 
-// These tests run against a real PostgreSQL database and wipe ticket data
-// between tests. Refuse to run against anything that is not a local/CI host.
-const SAFE_HOSTS = ['localhost', '127.0.0.1', 'postgres'];
-const dbHost = (() => {
-  try {
-    return new URL(process.env.DATABASE_URL ?? '').hostname;
-  } catch {
-    return '';
-  }
-})();
-if (!SAFE_HOSTS.includes(dbHost)) {
-  throw new Error(
-    `Refusing to run database tests against host "${dbHost || '(DATABASE_URL not set)'}". ` +
-      'Point DATABASE_URL at a local or CI PostgreSQL that has been migrated and seeded.',
-  );
-}
+import {
+  AGENT_1,
+  AGENT_2,
+  assertTestDatabase,
+  JOSEPH,
+  RUTH,
+  seedFixtures,
+  SUP,
+} from './test-fixtures.jest';
 
-const JOSEPH = '+260970000001';
-const RUTH = '+260970000002';
-const SUP: Actor = {
-  id: 'demo-supervisor',
-  role: 'SUPERVISOR',
-  name: 'Chanda Mwansa',
-};
-const AGENT_1: Actor = {
-  id: 'demo-agent-1',
-  role: 'BACK_OFFICE',
-  name: 'Martha Banda',
-};
+// These tests wipe ticket data between tests, so they run only against the
+// separate *_test database that the Jest global setup prepares.
+assertTestDatabase();
+
+const BACK_OFFICE = { [AGENT_1.id]: AGENT_1, [AGENT_2.id]: AGENT_2 };
 
 describe('AppController', () => {
   let module: TestingModule;
@@ -47,22 +33,25 @@ describe('AppController', () => {
   let service: AppService;
   let prisma: PrismaService;
 
+  /** An inbound WhatsApp message, as the webhook pipeline would deliver it. */
+  const simulate = (input: InboundInput) => service.handleInbound(input, true);
+
   /** Walk the WhatsApp bot through to a routed, assigned PIN reset. */
   const openPinReset = async (phone = JOSEPH) => {
-    await api.simulateInbound({ phone, text: 'Hi' });
-    await api.simulateInbound({
+    await simulate({ phone, text: 'Hi' });
+    await simulate({
       phone,
       replyId: 'PIN_RESET',
       text: 'PIN reset',
     });
-    const routed = await api.simulateInbound({
+    const routed = await simulate({
       phone,
       text: 'Customer 0971234567, NRC front/back and live photo attached',
     });
     return routed.ticketId!;
   };
   const get = async (id: string) =>
-    (await service.ticket(SUP.role, SUP.id, id))!;
+    (await service.ticket(SUP, id))!;
 
   beforeAll(async () => {
     module = await Test.createTestingModule({
@@ -79,6 +68,7 @@ describe('AppController', () => {
     api = module.get(AppController);
     service = module.get(AppService);
     prisma = module.get(PrismaService);
+    await seedFixtures(prisma);
   });
 
   beforeEach(async () => {
@@ -106,7 +96,7 @@ describe('AppController', () => {
 
   describe('entry bot', () => {
     it('greets a first message with the query-type menu', async () => {
-      const result = await api.simulateInbound({ phone: JOSEPH, text: 'Hi' });
+      const result = await simulate({ phone: JOSEPH, text: 'Hi' });
       expect(result.reference).toMatch(/^GSM-\d{6}$/);
       expect(result.botState).toBe('MENU');
       const ticket = await get(result.ticketId!);
@@ -125,7 +115,7 @@ describe('AppController', () => {
       expect(ticket.queryType).toBe('PIN_RESET');
       expect(ticket.status).toBe('ASSIGNED');
       expect(ticket.priority).toBe(1);
-      expect(ticket.assignedUserId).toMatch(/^demo-agent-/);
+      expect(ticket.assignedUserId).toMatch(/^test-agent-/);
       expect(ticket.botState).toBe('WITH_AGENT');
       expect(ticket.details.msisdn).toBe('+260971234567');
       expect(ticket.tags).toEqual(
@@ -143,7 +133,7 @@ describe('AppController', () => {
     });
 
     it('jumps straight to PIN reset on a trigger phrase', async () => {
-      const result = await api.simulateInbound({
+      const result = await simulate({
         phone: JOSEPH,
         text: 'forgot pin',
       });
@@ -151,9 +141,9 @@ describe('AppController', () => {
     });
 
     it('redirects other query types to email and closes the ticket', async () => {
-      await api.simulateInbound({ phone: RUTH, text: 'Hello' });
-      await api.simulateInbound({ phone: RUTH, text: 'Other' });
-      const result = await api.simulateInbound({
+      await simulate({ phone: RUTH, text: 'Hello' });
+      await simulate({ phone: RUTH, text: 'Other' });
+      const result = await simulate({
         phone: RUTH,
         replyId: 'REVERSAL',
       });
@@ -169,8 +159,8 @@ describe('AppController', () => {
     });
 
     it('re-asks when the reply is not a menu option', async () => {
-      await api.simulateInbound({ phone: JOSEPH, text: 'Hi' });
-      const result = await api.simulateInbound({
+      await simulate({ phone: JOSEPH, text: 'Hi' });
+      const result = await simulate({
         phone: JOSEPH,
         text: 'banana',
       });
@@ -187,7 +177,7 @@ describe('AppController', () => {
         text: 'done',
         templateId: 'success-pin-reset',
       });
-      const next = await api.simulateInbound({ phone: JOSEPH, text: 'Hi' });
+      const next = await simulate({ phone: JOSEPH, text: 'Hi' });
       expect(next.ticketId).not.toBe(first);
       expect(next.botState).toBe('MENU');
     });
@@ -232,7 +222,7 @@ describe('AppController', () => {
         templateId: 'doc-missing-live-nrc',
       });
       expect(pending.status).toBe('PENDING_INFORMATION');
-      await api.simulateInbound({
+      await simulate({
         phone: JOSEPH,
         text: 'Here are the NRC photos',
         mediaType: 'image',
@@ -291,12 +281,12 @@ describe('AppController', () => {
 
   describe('routing & access', () => {
     it('numbers tickets sequentially and threads follow-ups into the open ticket', async () => {
-      const first = await api.simulateInbound({ phone: JOSEPH, text: 'Hi' });
-      const followUp = await api.simulateInbound({
+      const first = await simulate({ phone: JOSEPH, text: 'Hi' });
+      const followUp = await simulate({
         phone: JOSEPH,
         text: 'PIN reset',
       });
-      const second = await api.simulateInbound({ phone: RUTH, text: 'Hi' });
+      const second = await simulate({ phone: RUTH, text: 'Hi' });
       expect(followUp.ticketId).toBe(first.ticketId);
       expect(Number(second.reference!.slice(4))).toBe(
         Number(first.reference!.slice(4)) + 1,
@@ -315,19 +305,19 @@ describe('AppController', () => {
       const id = await openPinReset();
       const previous = (await get(id)).assignedUserId!;
       const target =
-        previous === 'demo-agent-1' ? 'demo-agent-2' : 'demo-agent-1';
+        previous === AGENT_1.id ? AGENT_2.id : AGENT_1.id;
       await api.reassign(SUP, id, { userId: target });
-      expect(await service.ticket('BACK_OFFICE', previous, id)).toBeNull();
-      expect(await service.ticket('BACK_OFFICE', target, id)).not.toBeNull();
+      expect(await service.ticket(BACK_OFFICE[previous], id)).toBeNull();
+      expect(await service.ticket(BACK_OFFICE[target], id)).not.toBeNull();
     });
 
     it('ignores duplicate provider message identifiers', async () => {
-      const first = await api.simulateInbound({
+      const first = await simulate({
         phone: JOSEPH,
         text: 'Hi',
         providerId: 'wamid.test.123',
       });
-      const second = await api.simulateInbound({
+      const second = await simulate({
         phone: JOSEPH,
         text: 'Hi',
         providerId: 'wamid.test.123',

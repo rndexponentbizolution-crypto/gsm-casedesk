@@ -8,25 +8,19 @@ import { ScannerService } from './scanner';
 import { StorageService } from './storage';
 import { MetaClient, MetaError } from './whatsapp';
 
-// Live-mode messaging against a real PostgreSQL database, with Meta faked out.
-// Same safety rule as app.controller.spec.ts: local/CI databases only.
-const SAFE_HOSTS = ['localhost', '127.0.0.1', 'postgres'];
-const dbHost = (() => {
-  try {
-    return new URL(process.env.DATABASE_URL ?? '').hostname;
-  } catch {
-    return '';
-  }
-})();
-if (!SAFE_HOSTS.includes(dbHost))
-  throw new Error(
-    `Refusing to run database tests against host "${dbHost || '(DATABASE_URL not set)'}".`,
-  );
+import {
+  AGENT_1,
+  AGENT_2,
+  assertTestDatabase,
+  JOSEPH,
+  seedFixtures,
+  SUP,
+} from './test-fixtures.jest';
 
-const JOSEPH = '+260970000001';
-const SUP = { role: 'SUPERVISOR', id: 'demo-supervisor' };
-const AGENT_1 = { role: 'BACK_OFFICE', id: 'demo-agent-1' };
-const AGENT_2 = { role: 'BACK_OFFICE', id: 'demo-agent-2' };
+// Live-mode messaging against the separate *_test database, with Meta faked out.
+assertTestDatabase();
+
+const BACK_OFFICE = { [AGENT_1.id]: AGENT_1, [AGENT_2.id]: AGENT_2 };
 
 /** Stands in for Meta. Queue results per call; default is success. */
 class FakeMeta {
@@ -118,6 +112,7 @@ describe('Live messaging', () => {
     messaging = module.get(MessagingService);
     audits = module.get(AuditService);
     await prisma.$connect();
+    await seedFixtures(prisma);
   });
 
   beforeEach(async () => {
@@ -147,7 +142,7 @@ describe('Live messaging', () => {
 
   it('turns a webhook message into a ticket and sends the bot menu through Meta', async () => {
     await inbound({ type: 'text', text: { body: 'Hi' } });
-    const ticket = await app.ticket(SUP.role, SUP.id, await ticketOf());
+    const ticket = await app.ticket(SUP, await ticketOf());
     expect(ticket!.messages.map((m) => [m.direction, m.state, m.simulated])).toEqual([
       ['INBOUND', 'DELIVERED', false],
       ['OUTBOUND', 'SENT', false],
@@ -182,13 +177,13 @@ describe('Live messaging', () => {
     const id = await openPinReset();
     meta.sent = [];
     meta.failures = [new MetaError('Meta API 500', 500)];
-    await app.reply(AGENT_1.role, AGENT_1.id, id, 'On it');
+    await app.reply(AGENT_1, id, 'On it');
     await messaging.tick();
     const row = await prisma.outboundMessageOutbox.findFirstOrThrow({ where: { status: { not: 'SENT' } } });
     expect(row).toMatchObject({ status: 'PENDING', retryCount: 1 });
     expect(row.nextAttemptAt.getTime()).toBeGreaterThan(Date.now());
     // The supervisor view shows it while it is retrying.
-    const ops = await messaging.operations(SUP.role);
+    const ops = await messaging.operations(SUP);
     expect(ops.outbound.map((o) => o.id)).toContain(row.id);
 
     await prisma.outboundMessageOutbox.update({ where: { id: row.id }, data: { nextAttemptAt: new Date() } });
@@ -204,22 +199,22 @@ describe('Live messaging', () => {
   it('fails permanently on a permanent Meta error; a supervisor can retry or dismiss', async () => {
     const id = await openPinReset();
     meta.failures = [new MetaError('Re-engagement required', 400, 131047)];
-    await app.reply(AGENT_1.role, AGENT_1.id, id, 'Hello again');
+    await app.reply(AGENT_1, id, 'Hello again');
     await messaging.tick();
     const failed = await prisma.outboundMessageOutbox.findFirstOrThrow({ where: { status: 'FAILED' } });
     expect((await prisma.message.findUniqueOrThrow({ where: { id: failed.messageId } })).state).toBe('FAILED');
-    expect((await app.dashboard(SUP.role, SUP.id)).failedOutbound).toBe(1);
+    expect((await app.dashboard(SUP)).failedOutbound).toBe(1);
 
-    await expect(messaging.retryOutbound(AGENT_1.role, AGENT_1.id, failed.id)).rejects.toBeInstanceOf(ForbiddenException);
-    await messaging.retryOutbound(SUP.role, SUP.id, failed.id);
+    await expect(messaging.retryOutbound(AGENT_1, failed.id)).rejects.toBeInstanceOf(ForbiddenException);
+    await messaging.retryOutbound(SUP, failed.id);
     await messaging.tick();
     expect((await prisma.outboundMessageOutbox.findUniqueOrThrow({ where: { id: failed.id } })).status).toBe('SENT');
 
     meta.failures = [new MetaError('Bad recipient', 400, 131026)];
-    await app.reply(AGENT_1.role, AGENT_1.id, id, 'One more');
+    await app.reply(AGENT_1, id, 'One more');
     await messaging.tick();
     const second = await prisma.outboundMessageOutbox.findFirstOrThrow({ where: { status: 'FAILED' } });
-    await messaging.dismissOutbound(SUP.role, SUP.id, second.id);
+    await messaging.dismissOutbound(SUP, second.id);
     expect((await prisma.outboundMessageOutbox.findUniqueOrThrow({ where: { id: second.id } })).status).toBe('DISMISSED');
     const types = (await prisma.auditEvent.findMany({ where: { ticketId: id } })).map((e) => e.eventType);
     expect(types).toEqual(expect.arrayContaining(['MESSAGE_FAILED', 'OUTBOUND_RETRIED', 'OUTBOUND_DISMISSED']));
@@ -227,7 +222,7 @@ describe('Live messaging', () => {
 
   it('marks a send interrupted mid-flight as ambiguous instead of re-sending it', async () => {
     const id = await openPinReset();
-    await app.reply(AGENT_1.role, AGENT_1.id, id, 'Checking');
+    await app.reply(AGENT_1, id, 'Checking');
     const row = await prisma.outboundMessageOutbox.findFirstOrThrow({ where: { status: 'PENDING' } });
     // Simulate a worker that claimed it and died ten minutes ago.
     await prisma.$executeRaw`UPDATE "OutboundMessageOutbox" SET status = 'SENDING', "updatedAt" = now() - interval '10 minutes' WHERE id = ${row.id}`;
@@ -256,26 +251,26 @@ describe('Live messaging', () => {
       type: 'document',
       document: { id: 'MEDIA-IN-1', mime_type: 'application/pdf', filename: 'nrc front.pdf' },
     });
-    const ticket = await app.ticket(SUP.role, SUP.id, id);
+    const ticket = await app.ticket(SUP, id);
     const file = ticket!.messages.flatMap((m) => m.attachments)[0];
     expect(file).toMatchObject({ name: 'nrc front.pdf', mimeType: 'application/pdf', scanStatus: 'NOT_SCANNED', available: true });
 
     const assignee = ticket!.assignedUserId!;
     const other = assignee === AGENT_1.id ? AGENT_2 : AGENT_1;
-    const download = await app.attachment('BACK_OFFICE', assignee, file.id);
+    const download = await app.attachment(BACK_OFFICE[assignee], file.id);
     expect(download.body.toString()).toBe('%PDF-1.4 fake');
-    await expect(app.attachment(other.role, other.id, file.id)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(app.attachment(other, file.id)).rejects.toBeInstanceOf(ForbiddenException);
     const types = (await prisma.auditEvent.findMany({ where: { ticketId: id } })).map((e) => e.eventType);
     expect(types).toEqual(expect.arrayContaining(['ATTACHMENT_DOWNLOADED', 'ACCESS_DENIED']));
   });
 
   it('sends staff files through Meta and refuses types WhatsApp cannot carry', async () => {
     const id = await openPinReset();
-    const assignee = (await app.ticket(SUP.role, SUP.id, id))!.assignedUserId!;
+    const assignee = (await app.ticket(SUP, id))!.assignedUserId!;
     await expect(
-      app.sendMedia('BACK_OFFICE', assignee, id, { buffer: Buffer.from('<html>'), originalname: 'x.html', mimetype: 'text/html' }),
+      app.sendMedia(BACK_OFFICE[assignee], id, { buffer: Buffer.from('<html>'), originalname: 'x.html', mimetype: 'text/html' }),
     ).rejects.toBeInstanceOf(BadRequestException);
-    await app.sendMedia('BACK_OFFICE', assignee, id, { buffer: Buffer.from('%PDF'), originalname: 'form.pdf', mimetype: 'application/pdf' }, 'Please sign');
+    await app.sendMedia(BACK_OFFICE[assignee], id, { buffer: Buffer.from('%PDF'), originalname: 'form.pdf', mimetype: 'application/pdf' }, 'Please sign');
     await messaging.tick();
     expect(meta.uploads).toEqual(['form.pdf']);
     expect(meta.sent.at(-1)).toMatchObject({
@@ -284,17 +279,14 @@ describe('Live messaging', () => {
     });
   });
 
-  it('turns the simulator off in live mode', async () => {
-    await expect(app.simulateInbound({ phone: JOSEPH, text: 'Hi' })).rejects.toBeInstanceOf(BadRequestException);
-  });
 
   it('retries a failed inbound event on request', async () => {
     await messaging.receiveWebhook(webhookFor({ type: 'text', text: { body: 'Hi' } }));
     const event = await prisma.inboundWebhookEvent.findFirstOrThrow();
     await prisma.inboundWebhookEvent.update({ where: { id: event.id }, data: { status: 'FAILED', error: 'boom' } });
-    expect((await messaging.operations(SUP.role)).inbound.map((e) => e.id)).toContain(event.id);
-    expect((await app.dashboard(SUP.role, SUP.id)).stuckInbound).toBe(1);
-    await messaging.retryInbound(SUP.role, SUP.id, event.id);
+    expect((await messaging.operations(SUP)).inbound.map((e) => e.id)).toContain(event.id);
+    expect((await app.dashboard(SUP)).stuckInbound).toBe(1);
+    await messaging.retryInbound(SUP, event.id);
     await messaging.tick();
     expect((await prisma.inboundWebhookEvent.findUniqueOrThrow({ where: { id: event.id } })).status).toBe('PROCESSED');
   });

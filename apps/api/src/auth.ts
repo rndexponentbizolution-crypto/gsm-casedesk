@@ -8,40 +8,25 @@ import {
   createParamDecorator,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { effectivePermissions, type Permission, type RoleName } from './permissions';
 import { PrismaService } from './prisma.service';
 
 /**
  * Authentication: Keycloak proves who the caller is (a signed OIDC access token).
- * Authorisation: the CaseDesk `User` row decides what they may do — its role and
- * active flag. A valid token for someone with no active CaseDesk account is refused.
+ * Authorisation: the CaseDesk `User` row decides what they may do — its role, its
+ * per-person permission grants and revokes, and its active flag. A valid token for
+ * someone with no active CaseDesk account is refused. There is no other way in.
  */
 
 export type Actor = {
   /** The user's Keycloak subject (`sub`), stored as `User.keycloakId`. */
   id: string;
-  role: 'BACK_OFFICE' | 'SUPERVISOR' | 'ADMINISTRATOR';
+  role: RoleName;
   name: string;
+  email: string;
+  /** Effective permissions: role defaults plus grants, minus revokes. */
+  permissions: Permission[];
 };
-
-export type AuthMode = 'keycloak' | 'demo';
-
-/**
- * `keycloak` (default) requires a bearer token. `demo` trusts `x-demo-user` headers
- * and exists only for local development without Keycloak; it refuses to start in
- * production.
- */
-export function authMode(env: NodeJS.ProcessEnv = process.env): AuthMode {
-  const mode = (env.AUTH_MODE ?? 'keycloak').trim().toLowerCase();
-  if (mode === 'keycloak') return 'keycloak';
-  if (mode === 'demo') {
-    if (env.NODE_ENV === 'production')
-      throw new Error(
-        'AUTH_MODE=demo trusts unauthenticated headers and is not allowed when NODE_ENV=production.',
-      );
-    return 'demo';
-  }
-  throw new Error(`Unknown AUTH_MODE "${mode}". Use "keycloak" or "demo".`);
-}
 
 const IS_PUBLIC = 'casedesk:public';
 /** Marks a route as reachable without signing in (health checks only). */
@@ -107,8 +92,6 @@ const header = (req: AuthedRequest, name: string) => {
 /** Global, deny-by-default guard: every route needs a signed-in, active user. */
 @Injectable()
 export class AuthGuard implements CanActivate {
-  private readonly mode = authMode();
-
   constructor(
     private readonly reflector: Reflector,
     private readonly prisma: PrismaService,
@@ -128,22 +111,35 @@ export class AuthGuard implements CanActivate {
     const subject = await this.subject(req);
     const user = await this.prisma.user.findUnique({
       where: { keycloakId: subject },
-      select: { keycloakId: true, role: true, name: true, active: true },
+      select: {
+        keycloakId: true,
+        role: true,
+        name: true,
+        email: true,
+        active: true,
+        grantedPermissions: true,
+        revokedPermissions: true,
+      },
     });
     if (!user || !user.active)
       throw new ForbiddenException(
         'Your sign-in worked, but you do not have an active CaseDesk account. Ask an administrator to add you.',
       );
-    req.actor = { id: user.keycloakId, role: user.role, name: user.name };
+    req.actor = {
+      id: user.keycloakId,
+      role: user.role,
+      name: user.name,
+      email: user.email,
+      permissions: effectivePermissions(
+        user.role,
+        user.grantedPermissions,
+        user.revokedPermissions,
+      ),
+    };
     return true;
   }
 
   private async subject(req: AuthedRequest): Promise<string> {
-    if (this.mode === 'demo') {
-      const user = header(req, 'x-demo-user');
-      if (!user) throw new UnauthorizedException('Sign in required');
-      return user;
-    }
     const match = /^Bearer\s+(\S+)$/i.exec(header(req, 'authorization') ?? '');
     if (!match) throw new UnauthorizedException('Sign in required');
     try {

@@ -4,28 +4,47 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { AuthGuard, TokenVerifier, authMode } from './auth';
+import { AuthGuard, TokenVerifier } from './auth';
+import { effectivePermissions, ROLE_DEFAULTS } from './permissions';
 import { PrismaService } from './prisma.service';
 
 type User = {
   keycloakId: string;
   role: 'BACK_OFFICE' | 'SUPERVISOR' | 'ADMINISTRATOR';
   name: string;
+  email: string;
   active: boolean;
+  grantedPermissions: string[];
+  revokedPermissions: string[];
 };
 
 const USERS: User[] = [
   {
-    keycloakId: 'demo-agent-1',
+    keycloakId: 'agent',
     role: 'BACK_OFFICE',
-    name: 'Martha Banda',
+    name: 'Back Office',
+    email: 'agent@example.test',
     active: true,
+    grantedPermissions: ['reports.view'],
+    revokedPermissions: [],
+  },
+  {
+    keycloakId: 'restricted-supervisor',
+    role: 'SUPERVISOR',
+    name: 'Restricted Supervisor',
+    email: 'sup@example.test',
+    active: true,
+    grantedPermissions: [],
+    revokedPermissions: ['reports.export', 'tickets.reassign'],
   },
   {
     keycloakId: 'retired',
     role: 'SUPERVISOR',
     name: 'Former Staff',
+    email: 'former@example.test',
     active: false,
+    grantedPermissions: [],
+    revokedPermissions: [],
   },
 ];
 
@@ -65,32 +84,28 @@ const reflector = {
   getAllAndOverride: (_: string, [handler]: string[]) => handler === 'public',
 } as unknown as Reflector;
 
-function guard(env: Record<string, string>) {
-  const saved = { ...process.env };
-  Object.assign(process.env, env);
-  try {
-    return new AuthGuard(reflector, prisma, tokens);
-  } finally {
-    process.env = saved;
-  }
-}
-
-describe('authMode', () => {
-  it('defaults to keycloak', () => {
-    expect(authMode({})).toBe('keycloak');
+describe('effectivePermissions', () => {
+  it('starts from the role and applies per-person grants and revokes', () => {
+    expect(effectivePermissions('BACK_OFFICE')).toEqual(['tickets.reply']);
+    expect(effectivePermissions('BACK_OFFICE', ['reports.view'])).toEqual([
+      'tickets.reply',
+      'reports.view',
+    ]);
+    expect(
+      effectivePermissions('SUPERVISOR', [], ['reports.export']),
+    ).not.toContain('reports.export');
   });
-  it('refuses demo mode in production', () => {
-    expect(() =>
-      authMode({ AUTH_MODE: 'demo', NODE_ENV: 'production' }),
-    ).toThrow(/not allowed/);
+  it('gives administrators everything, including staff management', () => {
+    expect(effectivePermissions('ADMINISTRATOR')).toContain('staff.manage');
+    expect(ROLE_DEFAULTS.SUPERVISOR).not.toContain('staff.manage');
   });
-  it('rejects unknown modes', () => {
-    expect(() => authMode({ AUTH_MODE: 'none' })).toThrow(/Unknown/);
+  it('ignores unknown permission names', () => {
+    expect(effectivePermissions('BACK_OFFICE', ['root', 'staff.manage!'])).toEqual(['tickets.reply']);
   });
 });
 
-describe('AuthGuard (keycloak mode)', () => {
-  const g = guard({ AUTH_MODE: 'keycloak', NODE_ENV: 'test' });
+describe('AuthGuard', () => {
+  const g = new AuthGuard(reflector, prisma, tokens);
 
   it('lets public routes through without a token', async () => {
     await expect(g.canActivate(contextFor({}, true).ctx)).resolves.toBe(true);
@@ -102,14 +117,20 @@ describe('AuthGuard (keycloak mode)', () => {
     );
   });
 
-  it('ignores demo headers', async () => {
-    const { ctx } = contextFor({
-      'x-demo-user': 'demo-agent-1',
-      'x-demo-role': 'SUPERVISOR',
-    });
-    await expect(g.canActivate(ctx)).rejects.toBeInstanceOf(
-      UnauthorizedException,
-    );
+  it('ignores the old demo headers, whatever AUTH_MODE says', async () => {
+    const saved = process.env.AUTH_MODE;
+    process.env.AUTH_MODE = 'demo';
+    try {
+      const { ctx } = contextFor({
+        'x-demo-user': 'agent',
+        'x-demo-role': 'ADMINISTRATOR',
+      });
+      await expect(new AuthGuard(reflector, prisma, tokens).canActivate(ctx)).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    } finally {
+      process.env.AUTH_MODE = saved;
+    }
   });
 
   it('rejects an invalid token', async () => {
@@ -128,35 +149,27 @@ describe('AuthGuard (keycloak mode)', () => {
     }
   });
 
-  it('takes the role from the CaseDesk account, not the request', async () => {
+  it('takes role and permissions from the CaseDesk account, not the request', async () => {
     const { ctx, req } = contextFor({
-      authorization: 'Bearer valid:demo-agent-1',
+      authorization: 'Bearer valid:agent',
       'x-demo-role': 'SUPERVISOR',
     });
     await expect(g.canActivate(ctx)).resolves.toBe(true);
     expect(req.actor).toEqual({
-      id: 'demo-agent-1',
+      id: 'agent',
       role: 'BACK_OFFICE',
-      name: 'Martha Banda',
+      name: 'Back Office',
+      email: 'agent@example.test',
+      permissions: ['tickets.reply', 'reports.view'],
     });
   });
-});
 
-describe('AuthGuard (demo mode)', () => {
-  const g = guard({ AUTH_MODE: 'demo', NODE_ENV: 'development' });
-
-  it('has no default identity', async () => {
-    await expect(g.canActivate(contextFor({}).ctx)).rejects.toBeInstanceOf(
-      UnauthorizedException,
-    );
-  });
-
-  it('cannot escalate privileges with x-demo-role', async () => {
-    const { ctx, req } = contextFor({
-      'x-demo-user': 'demo-agent-1',
-      'x-demo-role': 'ADMINISTRATOR',
-    });
+  it('applies revoked permissions', async () => {
+    const { ctx, req } = contextFor({ authorization: 'Bearer valid:restricted-supervisor' });
     await g.canActivate(ctx);
-    expect((req.actor as { role: string }).role).toBe('BACK_OFFICE');
+    const permissions = (req.actor as { permissions: string[] }).permissions;
+    expect(permissions).toContain('reports.view');
+    expect(permissions).not.toContain('reports.export');
+    expect(permissions).not.toContain('tickets.reassign');
   });
 });

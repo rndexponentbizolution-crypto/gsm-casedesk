@@ -20,6 +20,7 @@ import type { Request } from 'express';
 import { AuditService } from './audit.service';
 import { type Actor, CurrentActor, Public } from './auth';
 import { MessagingService } from './messaging.service';
+import { requirePermission } from './permissions';
 import { validSignature } from './whatsapp';
 
 const sameText = (a: string, b: string) => {
@@ -74,29 +75,28 @@ export class MessagingController {
 
   @Get('api/operations')
   operations(@CurrentActor() actor: Actor) {
-    return this.messaging.operations(actor.role);
+    return this.messaging.operations(actor);
   }
 
   @Post('api/operations/outbound/:id/retry')
   retryOutbound(@CurrentActor() actor: Actor, @Param('id') id: string) {
-    return this.messaging.retryOutbound(actor.role, actor.id, id);
+    return this.messaging.retryOutbound(actor, id);
   }
 
   @Post('api/operations/outbound/:id/dismiss')
   dismissOutbound(@CurrentActor() actor: Actor, @Param('id') id: string) {
-    return this.messaging.dismissOutbound(actor.role, actor.id, id);
+    return this.messaging.dismissOutbound(actor, id);
   }
 
   @Post('api/operations/inbound/:id/retry')
   retryInbound(@CurrentActor() actor: Actor, @Param('id') id: string) {
-    return this.messaging.retryInbound(actor.role, actor.id, id);
+    return this.messaging.retryInbound(actor, id);
   }
 
   /** Re-computes the audit hash chain. Supervisors and administrators only. */
   @Get('api/audit/verify')
   async verifyAudit(@CurrentActor() actor: Actor) {
-    if (actor.role !== 'SUPERVISOR' && actor.role !== 'ADMINISTRATOR')
-      throw new ForbiddenException('Supervisor authorisation required');
+    requirePermission(actor, 'audit.verify');
     const result = await this.audits.verify();
     await this.audits.recordNow(null, actor.id, 'AUDIT_CHAIN_VERIFIED', {
       checked: result.checked,

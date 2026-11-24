@@ -1,31 +1,33 @@
 /**
- * Staff onboarding for CaseDesk. Keycloak proves who someone is; this creates the
- * CaseDesk account that decides what they may do. Every change is audited.
- *
- * In the API container (no TypeScript tooling) use: node dist/cli/staff.js <command> ...
+ * Break-glass staff tools. Day-to-day account management happens in CaseDesk under
+ * Staff; this is for setting up the first administrator and for recovery.
  *
  *   npm run staff -- list
- *   npm run staff -- add --keycloak-id <uuid> --name "Jane Phiri" --email jane@example.com
- *                        --role BACK_OFFICE|SUPERVISOR|ADMINISTRATOR [--team "Zambia Field Support"]
- *                        [--by <your keycloak id>]
- *   npm run staff -- set-role   --keycloak-id <uuid> --role SUPERVISOR [--by <id>]
- *   npm run staff -- deactivate --keycloak-id <uuid> [--by <id>]
- *   npm run staff -- reactivate --keycloak-id <uuid> [--by <id>]
+ *   npm run staff -- bootstrap-admin --email you@example.com --name "Your Name"
+ *   npm run staff -- deactivate --keycloak-id <id>
+ *   npm run staff -- reactivate --keycloak-id <id>
  *
- * The Keycloak ID is the user's "ID" in the Keycloak admin console (Users -> user).
- * Deactivating takes effect on their next request; their open tickets stay assigned
- * until a supervisor reassigns them.
+ * In the API container (no TypeScript tooling): node dist/cli/staff.js <command> ...
+ *
+ * bootstrap-admin creates the Keycloak sign-in and a CaseDesk ADMINISTRATOR (every
+ * permission) and prints a one-time temporary password. It only works while nobody
+ * can manage staff, so it cannot be used to add a second administrator behind the
+ * existing one's back. Run it in your own terminal: the password is shown once.
  */
-import { RoleName } from '@prisma/client';
 import { resolve } from 'node:path';
 import { loadEnv } from '../load-env';
 import { AuditService } from '../audit.service';
+import {
+  KeycloakAdmin,
+  keycloakName,
+  temporaryPassword,
+} from '../keycloak-admin';
+import { effectivePermissions } from '../permissions';
 import { PrismaService } from '../prisma.service';
 
 // src/cli and dist/cli are both two levels below apps/api.
 loadEnv(resolve(__dirname, '..', '..'));
 
-const ROLES = Object.values(RoleName);
 const DEFAULT_TEAM = 'Zambia Field Support';
 
 function parse(argv: string[]) {
@@ -45,99 +47,92 @@ const need = (flags: Record<string, string>, name: string) => {
   return value;
 };
 
-const role = (value: string) => {
-  const upper = value.toUpperCase() as RoleName;
-  if (!ROLES.includes(upper))
-    throw new Error(`--role must be one of ${ROLES.join(', ')}`);
-  return upper;
-};
-
 async function main() {
   const { command, flags } = parse(process.argv.slice(2));
   const prisma = new PrismaService();
   const audits = new AuditService(prisma);
-  // Who made the change: a staff keycloak id, or "system" for scripted setup.
-  const by = flags.by?.trim() || 'system';
-  const change = async (type: string, metadata: Record<string, unknown>) =>
-    audits.recordNow(null, by, type, metadata);
-
   try {
     switch (command) {
       case 'list': {
-        const users = await prisma.user.findMany({
-          include: { team: true },
-          orderBy: [{ active: 'desc' }, { role: 'asc' }, { name: 'asc' }],
-        });
-        console.table(
-          users.map((user) => ({
-            keycloakId: user.keycloakId,
-            name: user.name,
-            email: user.email,
-            role: user.role,
-            team: user.team?.name ?? '',
-            active: user.active,
-          })),
+        const users = await prisma.user.findMany({ orderBy: [{ active: 'desc' }, { name: 'asc' }] });
+        if (!users.length) console.log('No staff accounts yet. Run bootstrap-admin to create the first administrator.');
+        else
+          console.table(
+            users.map((user) => ({
+              keycloakId: user.keycloakId,
+              name: user.name,
+              email: user.email,
+              role: user.role,
+              active: user.active,
+              permissions: effectivePermissions(user.role, user.grantedPermissions, user.revokedPermissions).length,
+            })),
+          );
+        return;
+      }
+      case 'bootstrap-admin': {
+        const email = need(flags, 'email').toLowerCase();
+        const name = need(flags, 'name');
+        const managers = (await prisma.user.findMany({ where: { active: true } })).filter((user) =>
+          effectivePermissions(user.role, user.grantedPermissions, user.revokedPermissions).includes('staff.manage'),
         );
+        if (managers.length)
+          throw new Error(
+            `An administrator already exists (${managers.map((user) => user.email).join(', ')}). Create accounts in CaseDesk under Staff instead.`,
+          );
+        if (await prisma.user.findUnique({ where: { email } }))
+          throw new Error(`A CaseDesk account for ${email} already exists. Use reactivate, or pick another email.`);
+        const keycloak = new KeycloakAdmin();
+        if (await keycloak.findByEmail(email))
+          throw new Error(`Keycloak already has a sign-in for ${email}. Remove it in the Keycloak admin console first, or pick another email.`);
+        const password = temporaryPassword();
+        const keycloakId = await keycloak.createUser(keycloakName(name, email), password);
+        try {
+          const team = await prisma.team.upsert({
+            where: { name: DEFAULT_TEAM },
+            update: {},
+            create: { name: DEFAULT_TEAM, region: 'Zambia' },
+          });
+          await prisma.user.create({
+            data: { keycloakId, name, email, role: 'ADMINISTRATOR', teamId: team.id },
+          });
+        } catch (error) {
+          await keycloak.deleteUser(keycloakId).catch(() => undefined);
+          throw error;
+        }
+        await audits.recordNow(null, 'system', 'STAFF_ADDED', {
+          staffId: keycloakId,
+          email,
+          role: 'ADMINISTRATOR',
+          via: 'bootstrap-admin',
+        });
+        console.log(`\nCreated administrator ${name} <${email}>.`);
+        console.log(`\n  Sign-in:            ${email}`);
+        console.log(`  Temporary password: ${password}\n`);
+        console.log('You will be asked to choose your own password and set up an authenticator app at first sign-in.');
+        console.log('This temporary password is not stored anywhere and will not be shown again.\n');
         return;
       }
-      case 'add': {
-        const keycloakId = need(flags, 'keycloak-id');
-        const teamName = flags.team?.trim() || DEFAULT_TEAM;
-        const team = await prisma.team.upsert({
-          where: { name: teamName },
-          update: {},
-          create: { name: teamName },
-        });
-        const user = await prisma.user.create({
-          data: {
-            keycloakId,
-            name: need(flags, 'name'),
-            email: need(flags, 'email').toLowerCase(),
-            role: role(need(flags, 'role')),
-            teamId: team.id,
-          },
-        });
-        await change('STAFF_ADDED', {
-          keycloakId,
-          role: user.role,
-          team: teamName,
-        });
-        console.log(`Added ${user.name} (${user.role}).`);
-        return;
-      }
-      case 'set-role':
       case 'deactivate':
       case 'reactivate': {
         const keycloakId = need(flags, 'keycloak-id');
         const existing = await prisma.user.findUnique({ where: { keycloakId } });
         if (!existing) throw new Error(`No CaseDesk user with keycloak id ${keycloakId}`);
-        if (command === 'set-role') {
-          const next = role(need(flags, 'role'));
-          await prisma.user.update({ where: { keycloakId }, data: { role: next } });
-          await change('STAFF_ROLE_CHANGED', { keycloakId, from: existing.role, to: next });
-          console.log(`${existing.name}: ${existing.role} -> ${next}`);
-        } else {
-          const active = command === 'reactivate';
-          await prisma.user.update({ where: { keycloakId }, data: { active } });
-          await change(active ? 'STAFF_REACTIVATED' : 'STAFF_DEACTIVATED', { keycloakId });
-          const open = await prisma.ticketAssignment.count({
-            where: {
-              active: true,
-              user: { keycloakId },
-              ticket: { status: { notIn: ['RESOLVED', 'CLOSED'] } },
-            },
-          });
-          console.log(
-            `${existing.name} is now ${active ? 'active' : 'deactivated'}.` +
-              (!active && open ? ` They still hold ${open} open ticket(s); reassign them.` : ''),
-          );
+        const active = command === 'reactivate';
+        await prisma.user.update({ where: { keycloakId }, data: { active } });
+        const keycloak = new KeycloakAdmin();
+        if (keycloak.configured) {
+          await keycloak.updateUser(keycloakId, { enabled: active });
+          if (!active) await keycloak.logout(keycloakId).catch(() => undefined);
         }
+        await audits.recordNow(null, 'system', active ? 'STAFF_REACTIVATED' : 'STAFF_DEACTIVATED', {
+          staffId: keycloakId,
+          via: 'cli',
+        });
+        console.log(`${existing.name} is now ${active ? 'active' : 'deactivated'}.`);
         return;
       }
       default:
-        throw new Error(
-          'Usage: npm run staff -- list | add | set-role | deactivate | reactivate (see src/cli/staff.ts)',
-        );
+        throw new Error('Usage: npm run staff -- list | bootstrap-admin | deactivate | reactivate (see src/cli/staff.ts)');
     }
   } finally {
     await prisma.$disconnect();

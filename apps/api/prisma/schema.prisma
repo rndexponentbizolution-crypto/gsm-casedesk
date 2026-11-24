@@ -59,6 +59,10 @@ model User {
   team      Team?    @relation(fields: [teamId], references: [id])
   capacity  Int      @default(20)
   availability Boolean @default(true)
+  /// Permissions added on top of the role's defaults (see src/permissions.ts).
+  grantedPermissions String[] @default([])
+  /// Role defaults taken away from this person.
+  revokedPermissions String[] @default([])
   assignments TicketAssignment[]
   auditEvents AuditEvent[]
   createdAt DateTime @default(now())
